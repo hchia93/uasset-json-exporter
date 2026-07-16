@@ -14,4 +14,7 @@ namespace UAssetJsonExporter
 
     // Serialize JsonObject to FilePath as UTF-8 (no BOM). Creates output dir if missing.
     bool SaveJsonToFile(const TSharedRef<FJsonObject>& JsonObject, const FString& FilePath);
+
+    // Reflection walk from Object's class down to (not including) StopAtClass. Skips Transient/Deprecated.
+    TSharedPtr<FJsonObject> ExportSubclassProperties(UObject* Object, UClass* StopAtClass);
 }

@@ -28,6 +28,5 @@ public:
 private:
 
     TSharedPtr<FJsonObject> ExportDataAsset(class UDataAsset* DataAsset) const;
-    TSharedPtr<FJsonObject> ExportSubclassProperties(UObject* Object, UClass* StopAtClass) const;
 
 };

@@ -78,6 +78,7 @@ The community offers another approach, UE MCP (e.g. `kvick-games/UnrealMCP`, `ch
 | `DataTableExportCommandlet` | `DataTableExport` | DataTable row struct name, all row data (indexed by RowName) |
 | `NiagaraSystemExportCommandlet` | `NiagaraSystemExport` | Niagara system emitter list, spawn/update script parameters, renderer properties |
 | `MaterialExportCommandlet` | `MaterialExport` | Material node graph (expression connection chain), global settings; MaterialInstance parameter overrides |
+| `TextureExportCommandlet` | `TextureExport` | Texture asset properties via reflection (compression, sRGB, LOD group, mip settings, imported/source dimensions) |
 | `BehaviorTreeExportCommandlet` | `BehaviorTreeExport` | BT tree structure (Composite/Task/Decorator/Service), node parameters, Blackboard keys |
 | `AnimBlueprintExportCommandlet` | `AnimBlueprintExport` | AnimBP EdGraph, StateMachine (states/transitions/conditions/blend settings) |
 | `LevelExportCommandlet` | `LevelExport` | Level (.umap) actors / components, delta-from-archetype properties, collision / static mesh / ISM summary, streaming level configuration |
@@ -441,6 +442,7 @@ Plugin: `Plugins/UAssetJsonExporter` (Editor-only)
 | DataTableExportCommandlet | `DataTableExport` | DataTable row struct and all row data |
 | NiagaraSystemExportCommandlet | `NiagaraSystemExport` | Niagara emitters, scripts, renderers |
 | MaterialExportCommandlet | `MaterialExport` | Material expressions and connections; MI parameter overrides |
+| TextureExportCommandlet | `TextureExport` | Texture asset properties via reflection (compression, sRGB, LOD group, mips, source dimensions) |
 | BehaviorTreeExportCommandlet | `BehaviorTreeExport` | BT tree structure, node parameters, Blackboard keys |
 | AnimBlueprintExportCommandlet | `AnimBlueprintExport` | AnimBP EdGraph, StateMachines (states, transitions, blend settings) |
 | LevelExportCommandlet | `LevelExport` | Level (.umap) actors / components, delta-from-archetype properties, collision / static mesh / ISM summary, streaming levels |

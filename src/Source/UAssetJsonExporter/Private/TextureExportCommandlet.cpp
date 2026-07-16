@@ -1,17 +1,18 @@
-#include "DataAssetExportCommandlet.h"
+#include "TextureExportCommandlet.h"
 #include "UAssetJsonExporterModule.h"
 #include "UAssetJsonExporterUtil.h"
 #include "UAssetJsonExporterVersion.h"
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
-#include "Engine/DataAsset.h"
+#include "Engine/StreamableRenderAsset.h"
+#include "Engine/Texture.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 
-UDataAssetExportCommandlet::UDataAssetExportCommandlet()
+UTextureExportCommandlet::UTextureExportCommandlet()
 {
     IsClient = false;
     IsEditor = true;
@@ -19,20 +20,20 @@ UDataAssetExportCommandlet::UDataAssetExportCommandlet()
     LogToConsole = true;
 }
 
-int32 UDataAssetExportCommandlet::Main(const FString& Params)
+int32 UTextureExportCommandlet::Main(const FString& Params)
 {
     if (UAssetJsonExporter::AbortIfLiveEditor())
     {
         return 2;
     }
 
-    UE_LOG(LogUAssetJsonExporter, Display, TEXT("UAssetJsonExporter v%s - DataAssetExport"), UASSET_JSON_EXPORTER_VERSION_STRING);
+    UE_LOG(LogUAssetJsonExporter, Display, TEXT("UAssetJsonExporter v%s - TextureExport"), UASSET_JSON_EXPORTER_VERSION_STRING);
 
     TArray<FString> AssetPaths = UAssetJsonExporter::ParseAssetPaths(Params);
 
     if (AssetPaths.IsEmpty())
     {
-        UE_LOG(LogUAssetJsonExporter, Error, TEXT("No assets specified. Usage: -assets=\"/Game/Path/DA_A,/Game/Path/DA_B\""));
+        UE_LOG(LogUAssetJsonExporter, Error, TEXT("No assets specified. Usage: -assets=\"/Game/Path/T_A,/Game/Path/T_B\""));
         return 1;
     }
 
@@ -40,17 +41,17 @@ int32 UDataAssetExportCommandlet::Main(const FString& Params)
 
     for (const FString& AssetPath : AssetPaths)
     {
-        UDataAsset* DataAsset = LoadObject<UDataAsset>(nullptr, *AssetPath);
-        if (!DataAsset)
+        UTexture* Texture = LoadObject<UTexture>(nullptr, *AssetPath);
+        if (!Texture)
         {
-            UE_LOG(LogUAssetJsonExporter, Warning, TEXT("Failed to load DataAsset: %s"), *AssetPath);
+            UE_LOG(LogUAssetJsonExporter, Warning, TEXT("Failed to load Texture: %s"), *AssetPath);
             continue;
         }
 
-        TSharedPtr<FJsonObject> JsonObject = ExportDataAsset(DataAsset);
+        TSharedPtr<FJsonObject> JsonObject = ExportTexture(Texture);
         if (!JsonObject.IsValid())
         {
-            UE_LOG(LogUAssetJsonExporter, Warning, TEXT("Failed to export DataAsset: %s"), *AssetPath);
+            UE_LOG(LogUAssetJsonExporter, Warning, TEXT("Failed to export Texture: %s"), *AssetPath);
             continue;
         }
 
@@ -62,24 +63,24 @@ int32 UDataAssetExportCommandlet::Main(const FString& Params)
         }
     }
 
-    UE_LOG(LogUAssetJsonExporter, Display, TEXT("Export complete. %d/%d data assets exported."), ExportedCount, AssetPaths.Num());
+    UE_LOG(LogUAssetJsonExporter, Display, TEXT("Export complete. %d/%d textures exported."), ExportedCount, AssetPaths.Num());
     return 0;
 }
 
-TSharedPtr<FJsonObject> UDataAssetExportCommandlet::ExportDataAsset(UDataAsset* DataAsset) const
+TSharedPtr<FJsonObject> UTextureExportCommandlet::ExportTexture(UTexture* Texture) const
 {
     TSharedPtr<FJsonObject> Root = MakeShared<FJsonObject>();
 
     Root->SetStringField(TEXT("ExporterVersion"), UASSET_JSON_EXPORTER_VERSION_STRING);
-    Root->SetStringField(TEXT("ExportType"), TEXT("DataAsset"));
-    Root->SetStringField(TEXT("DataAssetName"), DataAsset->GetName());
-    Root->SetStringField(TEXT("AssetPath"), DataAsset->GetPathName());
-    Root->SetStringField(TEXT("Class"), DataAsset->GetClass()->GetName());
+    Root->SetStringField(TEXT("ExportType"), TEXT("Texture"));
+    Root->SetStringField(TEXT("TextureName"), Texture->GetName());
+    Root->SetStringField(TEXT("AssetPath"), Texture->GetPathName());
+    Root->SetStringField(TEXT("Class"), Texture->GetClass()->GetName());
     Root->SetStringField(TEXT("ExportTimestamp"), FDateTime::Now().ToString());
 
     // Class hierarchy
     TArray<TSharedPtr<FJsonValue>> HierarchyArray;
-    UClass* CurrentClass = DataAsset->GetClass();
+    UClass* CurrentClass = Texture->GetClass();
     while (CurrentClass && CurrentClass != UObject::StaticClass())
     {
         HierarchyArray.Add(MakeShared<FJsonValueString>(CurrentClass->GetName()));
@@ -87,8 +88,9 @@ TSharedPtr<FJsonObject> UDataAssetExportCommandlet::ExportDataAsset(UDataAsset* 
     }
     Root->SetArrayField(TEXT("ClassHierarchy"), HierarchyArray);
 
-    // All properties from the DataAsset subclass down to (but not including) UDataAsset base
-    TSharedPtr<FJsonObject> Props = UAssetJsonExporter::ExportSubclassProperties(DataAsset, UDataAsset::StaticClass());
+    // No surface summary; PlatformData is unbuilt in commandlet mode, dimensions live in ImportedSize / Source
+    // All properties from the texture class down to (but not including) UStreamableRenderAsset base
+    TSharedPtr<FJsonObject> Props = UAssetJsonExporter::ExportSubclassProperties(Texture, UStreamableRenderAsset::StaticClass());
     if (Props.IsValid() && Props->Values.Num() > 0)
     {
         Root->SetObjectField(TEXT("Properties"), Props);
@@ -96,4 +98,3 @@ TSharedPtr<FJsonObject> UDataAssetExportCommandlet::ExportDataAsset(UDataAsset* 
 
     return Root;
 }
-

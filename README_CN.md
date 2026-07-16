@@ -78,6 +78,7 @@ UE 只是首个落地场景，下面三项可复用资产并不依赖它。
 | `DataTableExportCommandlet` | `DataTableExport` | DataTable 的行结构名称、所有行数据（按 RowName 索引） |
 | `NiagaraSystemExportCommandlet` | `NiagaraSystemExport` | Niagara System 的 Emitter 列表、Spawn/Update 脚本参数、Renderer 属性 |
 | `MaterialExportCommandlet` | `MaterialExport` | Material 节点图（Expression 连接链）、全局设置；MaterialInstance 参数覆盖表 |
+| `TextureExportCommandlet` | `TextureExport` | 通过反射导出 Texture 资产属性（压缩设置、sRGB、LOD 组、mip 设置、导入/源尺寸） |
 | `BehaviorTreeExportCommandlet` | `BehaviorTreeExport` | BT 树结构（Composite/Task/Decorator/Service）、节点参数、Blackboard Keys |
 | `AnimBlueprintExportCommandlet` | `AnimBlueprintExport` | AnimBP 的 EdGraph、StateMachine（States/Transitions/条件规则/Blend 设置） |
 | `LevelExportCommandlet` | `LevelExport` | Level（.umap）中的 Actor / Component、delta-from-archetype 属性、碰撞 / StaticMesh / ISM 摘要、Streaming Level 配置 |
@@ -441,6 +442,7 @@ Plugin: `Plugins/UAssetJsonExporter` (Editor-only)
 | DataTableExportCommandlet | `DataTableExport` | DataTable row struct and all row data |
 | NiagaraSystemExportCommandlet | `NiagaraSystemExport` | Niagara emitters, scripts, renderers |
 | MaterialExportCommandlet | `MaterialExport` | Material expressions and connections; MI parameter overrides |
+| TextureExportCommandlet | `TextureExport` | 通过反射导出 Texture 资产属性（压缩设置、sRGB、LOD 组、mip、源尺寸） |
 | BehaviorTreeExportCommandlet | `BehaviorTreeExport` | BT tree structure, node parameters, Blackboard keys |
 | AnimBlueprintExportCommandlet | `AnimBlueprintExport` | AnimBP EdGraph, StateMachines (states, transitions, blend settings) |
 | LevelExportCommandlet | `LevelExport` | Level (.umap) actors / components, delta-from-archetype properties, collision / static mesh / ISM summary, streaming levels |
