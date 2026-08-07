@@ -80,7 +80,7 @@ UE 只是首个落地场景，下面三项可复用资产并不依赖它。
 | `MaterialExportCommandlet` | `MaterialExport` | Material 节点图（Expression 连接链）、全局设置；MaterialInstance 参数覆盖表 |
 | `TextureExportCommandlet` | `TextureExport` | 通过反射导出 Texture 资产属性（压缩设置、sRGB、LOD 组、mip 设置、导入/源尺寸） |
 | `BehaviorTreeExportCommandlet` | `BehaviorTreeExport` | BT 树结构（Composite/Task/Decorator/Service）、节点参数、Blackboard Keys |
-| `AnimBlueprintExportCommandlet` | `AnimBlueprintExport` | AnimBP 的 EdGraph、StateMachine（States/Transitions/条件规则/Blend 设置） |
+| `AnimBlueprintExportCommandlet` | `AnimBlueprintExport` | AnimBP 的 EdGraph、StateMachine（State 类型、Transition 优先级 / 逻辑类型 / Blend 设置）、逐节点动画资产与非默认 anim node 设置、Property Access 绑定路径 |
 | `LevelExportCommandlet` | `LevelExport` | Level（.umap）中的 Actor / Component、delta-from-archetype 属性、碰撞 / StaticMesh / ISM 摘要、Streaming Level 配置 |
 
 ## 使用方法
@@ -197,6 +197,71 @@ taskkill /F /IM UnrealEditor-Cmd.exe
     ]
 }
 ```
+</details>
+
+<details>
+<summary>AnimBlueprint</summary>
+
+```json
+{
+    "ExporterVersion": "1.9.0",
+    "ExportType": "AnimBlueprint",
+    "AnimBlueprintName": "ABP_Character",
+    "ParentClass": "AnimInstance",
+    "TargetSkeleton": "/Game/Characters/Meshes/SK_Character_Skeleton",
+    "Graphs": [
+        {
+            "GraphType": "AnimGraph",
+            "Nodes": [
+                {
+                    "Class": "AnimGraphNode_SequencePlayer",
+                    "Title": "Play AS_Idle",
+                    "AnimationAsset": "/Game/Characters/Anims/AS_Idle.AS_Idle",
+                    "Settings": {
+                        "PlayRate": "1.250000",
+                        "StartPosition": "0.400000",
+                        "bLoopAnimation": "False"
+                    },
+                    "Pins": [ ... ]
+                },
+                {
+                    "Class": "K2Node_PropertyAccess",
+                    "Title": "Movement State Is Turning",
+                    "PropertyPath": "Movement State Is Turning",
+                    "PropertyPathSegments": [ "MovementState", "bIsTurning" ],
+                    "ResolvedPath": "MovementState.bIsTurning",
+                    "Pins": [ ... ]
+                }
+            ]
+        }
+    ],
+    "StateMachines": [
+        {
+            "StateMachineName": "Locomotion",
+            "States": [
+                { "StateName": "Idle", "StateType": "AST_BlendGraph", "BoundGraph": { ... } },
+                { "StateName": "Sprint", "StateType": "AST_BlendGraph", "bAlwaysResetOnEntry": true, "BoundGraph": { ... } }
+            ],
+            "Transitions": [
+                {
+                    "FromState": "Idle",
+                    "ToState": "Sprint",
+                    "CrossfadeDuration": 0.2,
+                    "BlendMode": "HermiteCubic",
+                    "PriorityOrder": 1,
+                    "LogicType": "TLT_Inertialization",
+                    "MinTimeBeforeReentry": 0.15,
+                    "TransitionRule": { ... }
+                }
+            ]
+        }
+    ]
+}
+```
+
+`Settings` 只包含 anim node 结构体中与结构体默认值有差异的字段，因此 `PlayRate` / `StartPosition` / `bLoopAnimation` / `BlendSpace` 只在设计师真正改过的地方出现。
+
+默认关闭的 Transition 字段（`bDisabled`、`Bidirectional`、`bSharedRules`、`CustomBlendCurve`、`CustomTransitionGraph` 等）只在被设置时才导出，非标准的 Transition 可以直接 grep 出来，不会被淹没。
 </details>
 
 <details>
@@ -444,7 +509,7 @@ Plugin: `Plugins/UAssetJsonExporter` (Editor-only)
 | MaterialExportCommandlet | `MaterialExport` | Material expressions and connections; MI parameter overrides |
 | TextureExportCommandlet | `TextureExport` | 通过反射导出 Texture 资产属性（压缩设置、sRGB、LOD 组、mip、源尺寸） |
 | BehaviorTreeExportCommandlet | `BehaviorTreeExport` | BT tree structure, node parameters, Blackboard keys |
-| AnimBlueprintExportCommandlet | `AnimBlueprintExport` | AnimBP EdGraph, StateMachines (states, transitions, blend settings) |
+| AnimBlueprintExportCommandlet | `AnimBlueprintExport` | AnimBP EdGraph, StateMachines (states, transitions, blend settings), anim node settings, Property Access binding paths |
 | LevelExportCommandlet | `LevelExport` | Level (.umap) actors / components, delta-from-archetype properties, collision / static mesh / ISM summary, streaming levels |
 
 ### Usage
@@ -470,7 +535,7 @@ Do NOT read the entire file at once. Instead:
 - Need to verify variable defaults, component setup, or event flow
 - Need to check AnimMontage notify timing, DataAsset configuration, or material setup
 - Need to inspect Niagara emitter parameters or DataTable values
-- Need to understand BehaviorTree logic flow or AnimBP state machine transitions
+- Need to understand BehaviorTree logic flow, AnimBP state machine transitions, or Property Access bindings
 - Need to audit a Level: actor placements, static mesh / collision setup, streaming level config, per-instance overrides
 ```
 
@@ -478,9 +543,16 @@ AI 会在相关任务中自动调用 Commandlet 导出并分析资产内容。
 
 ## 版本
 
-当前版本：**v1.5.0**
+当前版本：**v1.9.0**
 
 版本号定义在 `src/Source/UAssetJsonExporter/Public/UAssetJsonExporterVersion.h`，同时嵌入在每个导出 JSON 的 `ExporterVersion` 字段中。
+
+## 相关插件
+
+| 插件 | 作用 |
+|---|---|
+| [ue-map-utils](https://github.com/hchia93/ue-map-utils) | 编辑器内 Actor 完整性审查、session 变更回顾、关卡上下文导出 |
+| [uasset-name-linter](https://github.com/hchia93/uasset-name-linter) | `.uasset` / `.umap` 命名规范校验，输出 INI 分桶与 HTML 报告 |
 
 ## License
 

@@ -3,11 +3,15 @@
 #include "UAssetJsonExporterUtil.h"
 #include "UAssetJsonExporterVersion.h"
 
+#include "Animation/AnimationAsset.h"
 #include "Animation/AnimBlueprint.h"
+#include "Animation/AnimStateMachineTypes.h"
 #include "AnimationStateMachineGraph.h"
+#include "AnimGraphNode_Base.h"
 #include "AnimGraphNode_StateMachineBase.h"
 #include "AnimStateNode.h"
 #include "AnimStateTransitionNode.h"
+#include "Curves/CurveFloat.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "EdGraph/EdGraph.h"
@@ -21,6 +25,8 @@
 #include "Misc/Paths.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "UObject/StructOnScope.h"
+#include "UObject/UnrealType.h"
 
 UAnimBlueprintExportCommandlet::UAnimBlueprintExportCommandlet()
 {
@@ -177,6 +183,12 @@ TSharedPtr<FJsonObject> UAnimBlueprintExportCommandlet::ExportStateMachine(UAnim
             TSharedPtr<FJsonObject> StateObj = MakeShared<FJsonObject>();
             StateObj->SetStringField(TEXT("StateName"), StateNode->GetStateName());
             StateObj->SetStringField(TEXT("NodeId"), StateNode->NodeGuid.ToString());
+            StateObj->SetStringField(TEXT("StateType"), StaticEnum<EAnimStateType>()->GetNameStringByValue(static_cast<int64>(StateNode->StateType.GetValue())));
+
+            if (StateNode->bAlwaysResetOnEntry)
+            {
+                StateObj->SetBoolField(TEXT("bAlwaysResetOnEntry"), true);
+            }
 
             if (!StateNode->NodeComment.IsEmpty())
             {
@@ -214,6 +226,62 @@ TSharedPtr<FJsonObject> UAnimBlueprintExportCommandlet::ExportStateMachine(UAnim
 
             TransObj->SetNumberField(TEXT("CrossfadeDuration"), TransNode->CrossfadeDuration);
             TransObj->SetStringField(TEXT("BlendMode"), StaticEnum<EAlphaBlendOption>()->GetNameStringByValue(static_cast<int64>(TransNode->BlendMode)));
+            TransObj->SetNumberField(TEXT("PriorityOrder"), TransNode->PriorityOrder);
+            TransObj->SetStringField(TEXT("LogicType"), StaticEnum<ETransitionLogicType::Type>()->GetNameStringByValue(static_cast<int64>(TransNode->LogicType.GetValue())));
+
+            // Everything below is off by default, emitting it unconditionally would bury the one transition
+            // that actually carries a non-standard setting
+            if (TransNode->bAutomaticRuleBasedOnSequencePlayerInState)
+            {
+                TransObj->SetBoolField(TEXT("bAutomaticRuleBasedOnSequencePlayerInState"), true);
+                TransObj->SetNumberField(TEXT("AutomaticRuleTriggerTime"), TransNode->AutomaticRuleTriggerTime);
+            }
+
+            if (TransNode->bDisabled)
+            {
+                TransObj->SetBoolField(TEXT("bDisabled"), true);
+            }
+
+            if (TransNode->Bidirectional)
+            {
+                TransObj->SetBoolField(TEXT("Bidirectional"), true);
+            }
+
+            if (TransNode->MinTimeBeforeReentry >= 0.0f)
+            {
+                TransObj->SetNumberField(TEXT("MinTimeBeforeReentry"), TransNode->MinTimeBeforeReentry);
+            }
+
+            if (TransNode->bAllowInertializationForSelfTransitions)
+            {
+                TransObj->SetBoolField(TEXT("bAllowInertializationForSelfTransitions"), true);
+            }
+
+            if (!TransNode->SyncGroupNameToRequireValidMarkersRule.IsNone())
+            {
+                TransObj->SetStringField(TEXT("SyncGroupNameToRequireValidMarkersRule"), TransNode->SyncGroupNameToRequireValidMarkersRule.ToString());
+            }
+
+            if (TransNode->bSharedRules)
+            {
+                TransObj->SetBoolField(TEXT("bSharedRules"), true);
+                TransObj->SetStringField(TEXT("SharedRulesName"), TransNode->SharedRulesName);
+            }
+
+            if (TransNode->CustomBlendCurve)
+            {
+                TransObj->SetStringField(TEXT("CustomBlendCurve"), TransNode->CustomBlendCurve->GetPathName());
+            }
+
+            // Custom blend logic lives in its own pose graph, without it a Custom LogicType reads as a bare rule
+            if (TransNode->CustomTransitionGraph)
+            {
+                TSharedPtr<FJsonObject> CustomGraph = ExportGraph(TransNode->CustomTransitionGraph);
+                if (CustomGraph.IsValid())
+                {
+                    TransObj->SetObjectField(TEXT("CustomTransitionGraph"), CustomGraph);
+                }
+            }
 
             // Export transition rule graph
             if (TransNode->BoundGraph)
@@ -311,6 +379,22 @@ TSharedPtr<FJsonObject> UAnimBlueprintExportCommandlet::ExportNode(const UEdGrap
         }
     }
 
+    if (const UAnimGraphNode_Base* AnimNode = Cast<UAnimGraphNode_Base>(Node))
+    {
+        if (const UAnimationAsset* Asset = AnimNode->GetAnimationAsset())
+        {
+            NodeObj->SetStringField(TEXT("AnimationAsset"), Asset->GetPathName());
+        }
+
+        TSharedPtr<FJsonObject> Settings = ExportAnimNodeSettings(AnimNode);
+        if (Settings.IsValid())
+        {
+            NodeObj->SetObjectField(TEXT("Settings"), Settings);
+        }
+    }
+
+    AddPropertyAccessPath(Node, NodeObj);
+
     TArray<TSharedPtr<FJsonValue>> PinsArray;
     for (const UEdGraphPin* Pin : Node->Pins)
     {
@@ -328,6 +412,87 @@ TSharedPtr<FJsonObject> UAnimBlueprintExportCommandlet::ExportNode(const UEdGrap
     NodeObj->SetArrayField(TEXT("Pins"), PinsArray);
 
     return NodeObj;
+}
+
+TSharedPtr<FJsonObject> UAnimBlueprintExportCommandlet::ExportAnimNodeSettings(const UAnimGraphNode_Base* AnimNode) const
+{
+    FStructProperty* NodeProp = AnimNode->GetFNodeProperty();
+    if (!NodeProp || !NodeProp->Struct)
+    {
+        return nullptr;
+    }
+
+    const void* NodePtr = NodeProp->ContainerPtrToValuePtr<void>(AnimNode);
+
+    // Diff against a scratch default instance, a full dump buries the handful of fields a designer touched
+    FStructOnScope Defaults(NodeProp->Struct);
+    const void* DefaultsPtr = Defaults.GetStructMemory();
+
+    TSharedPtr<FJsonObject> Settings = MakeShared<FJsonObject>();
+
+    for (TFieldIterator<FProperty> PropIt(NodeProp->Struct); PropIt; ++PropIt)
+    {
+        FProperty* Prop = *PropIt;
+        if (Prop->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated))
+        {
+            continue;
+        }
+
+        const void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(NodePtr);
+        const void* DefaultPtr = Prop->ContainerPtrToValuePtr<void>(DefaultsPtr);
+        if (Prop->Identical(ValuePtr, DefaultPtr, PPF_DeepComparison))
+        {
+            continue;
+        }
+
+        FString Value;
+        Prop->ExportTextItem_Direct(Value, ValuePtr, DefaultPtr, nullptr, PPF_None);
+        if (!Value.IsEmpty())
+        {
+            Settings->SetStringField(Prop->GetName(), Value);
+        }
+    }
+
+    return Settings->Values.Num() > 0 ? Settings : nullptr;
+}
+
+void UAnimBlueprintExportCommandlet::AddPropertyAccessPath(const UEdGraphNode* Node, const TSharedPtr<FJsonObject>& NodeObj) const
+{
+    if (Node->GetClass()->GetName() != TEXT("K2Node_PropertyAccess"))
+    {
+        return;
+    }
+
+    if (const FTextProperty* TextPathProp = FindFProperty<FTextProperty>(Node->GetClass(), TEXT("TextPath")))
+    {
+        const FText* TextPath = TextPathProp->ContainerPtrToValuePtr<FText>(Node);
+        if (TextPath && !TextPath->IsEmpty())
+        {
+            NodeObj->SetStringField(TEXT("PropertyPath"), TextPath->ToString());
+        }
+    }
+
+    const FArrayProperty* PathProp = FindFProperty<FArrayProperty>(Node->GetClass(), TEXT("Path"));
+    if (!PathProp || !CastField<FStrProperty>(PathProp->Inner))
+    {
+        return;
+    }
+
+    const TArray<FString>* Path = PathProp->ContainerPtrToValuePtr<TArray<FString>>(Node);
+    if (!Path || Path->IsEmpty())
+    {
+        return;
+    }
+
+    TArray<TSharedPtr<FJsonValue>> SegmentsArray;
+    for (const FString& Segment : *Path)
+    {
+        SegmentsArray.Add(MakeShared<FJsonValueString>(Segment));
+    }
+    NodeObj->SetArrayField(TEXT("PropertyPathSegments"), SegmentsArray);
+
+    // TextPath is display text ("Sprint State Is Turning"), the joined segments are what the binding resolves
+    NodeObj->SetStringField(TEXT("ResolvedPath"), FString::Join(*Path, TEXT(".")));
 }
 
 TSharedPtr<FJsonObject> UAnimBlueprintExportCommandlet::ExportPin(const UEdGraphPin* Pin) const

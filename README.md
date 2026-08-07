@@ -80,7 +80,7 @@ The community offers another approach, UE MCP (e.g. `kvick-games/UnrealMCP`, `ch
 | `MaterialExportCommandlet` | `MaterialExport` | Material node graph (expression connection chain), global settings; MaterialInstance parameter overrides |
 | `TextureExportCommandlet` | `TextureExport` | Texture asset properties via reflection (compression, sRGB, LOD group, mip settings, imported/source dimensions) |
 | `BehaviorTreeExportCommandlet` | `BehaviorTreeExport` | BT tree structure (Composite/Task/Decorator/Service), node parameters, Blackboard keys |
-| `AnimBlueprintExportCommandlet` | `AnimBlueprintExport` | AnimBP EdGraph, StateMachine (states/transitions/conditions/blend settings) |
+| `AnimBlueprintExportCommandlet` | `AnimBlueprintExport` | AnimBP EdGraph, StateMachine (state type, transition priority / logic type / blend settings), per-node animation asset and non-default anim node settings, Property Access binding paths |
 | `LevelExportCommandlet` | `LevelExport` | Level (.umap) actors / components, delta-from-archetype properties, collision / static mesh / ISM summary, streaming level configuration |
 
 ## Usage
@@ -197,6 +197,71 @@ Every JSON file contains `ExporterVersion` and `ExportType` fields identifying t
     ]
 }
 ```
+</details>
+
+<details>
+<summary>AnimBlueprint</summary>
+
+```json
+{
+    "ExporterVersion": "1.9.0",
+    "ExportType": "AnimBlueprint",
+    "AnimBlueprintName": "ABP_Character",
+    "ParentClass": "AnimInstance",
+    "TargetSkeleton": "/Game/Characters/Meshes/SK_Character_Skeleton",
+    "Graphs": [
+        {
+            "GraphType": "AnimGraph",
+            "Nodes": [
+                {
+                    "Class": "AnimGraphNode_SequencePlayer",
+                    "Title": "Play AS_Idle",
+                    "AnimationAsset": "/Game/Characters/Anims/AS_Idle.AS_Idle",
+                    "Settings": {
+                        "PlayRate": "1.250000",
+                        "StartPosition": "0.400000",
+                        "bLoopAnimation": "False"
+                    },
+                    "Pins": [ ... ]
+                },
+                {
+                    "Class": "K2Node_PropertyAccess",
+                    "Title": "Movement State Is Turning",
+                    "PropertyPath": "Movement State Is Turning",
+                    "PropertyPathSegments": [ "MovementState", "bIsTurning" ],
+                    "ResolvedPath": "MovementState.bIsTurning",
+                    "Pins": [ ... ]
+                }
+            ]
+        }
+    ],
+    "StateMachines": [
+        {
+            "StateMachineName": "Locomotion",
+            "States": [
+                { "StateName": "Idle", "StateType": "AST_BlendGraph", "BoundGraph": { ... } },
+                { "StateName": "Sprint", "StateType": "AST_BlendGraph", "bAlwaysResetOnEntry": true, "BoundGraph": { ... } }
+            ],
+            "Transitions": [
+                {
+                    "FromState": "Idle",
+                    "ToState": "Sprint",
+                    "CrossfadeDuration": 0.2,
+                    "BlendMode": "HermiteCubic",
+                    "PriorityOrder": 1,
+                    "LogicType": "TLT_Inertialization",
+                    "MinTimeBeforeReentry": 0.15,
+                    "TransitionRule": { ... }
+                }
+            ]
+        }
+    ]
+}
+```
+
+`Settings` carries only the anim node struct fields that differ from the struct defaults, so `PlayRate` / `StartPosition` / `bLoopAnimation` / `BlendSpace` show up only where a designer actually changed them.
+
+Transition fields that are off by default (`bDisabled`, `Bidirectional`, `bSharedRules`, `CustomBlendCurve`, `CustomTransitionGraph`, ...) are emitted only when set, so a non-standard transition is visible by grep instead of buried.
 </details>
 
 <details>
@@ -444,7 +509,7 @@ Plugin: `Plugins/UAssetJsonExporter` (Editor-only)
 | MaterialExportCommandlet | `MaterialExport` | Material expressions and connections; MI parameter overrides |
 | TextureExportCommandlet | `TextureExport` | Texture asset properties via reflection (compression, sRGB, LOD group, mips, source dimensions) |
 | BehaviorTreeExportCommandlet | `BehaviorTreeExport` | BT tree structure, node parameters, Blackboard keys |
-| AnimBlueprintExportCommandlet | `AnimBlueprintExport` | AnimBP EdGraph, StateMachines (states, transitions, blend settings) |
+| AnimBlueprintExportCommandlet | `AnimBlueprintExport` | AnimBP EdGraph, StateMachines (states, transitions, blend settings), anim node settings, Property Access binding paths |
 | LevelExportCommandlet | `LevelExport` | Level (.umap) actors / components, delta-from-archetype properties, collision / static mesh / ISM summary, streaming levels |
 
 ### Usage
@@ -470,7 +535,7 @@ Do NOT read the entire file at once. Instead:
 - Need to verify variable defaults, component setup, or event flow
 - Need to check AnimMontage notify timing, DataAsset configuration, or material setup
 - Need to inspect Niagara emitter parameters or DataTable values
-- Need to understand BehaviorTree logic flow or AnimBP state machine transitions
+- Need to understand BehaviorTree logic flow, AnimBP state machine transitions, or Property Access bindings
 - Need to audit a Level: actor placements, static mesh / collision setup, streaming level config, per-instance overrides
 ```
 
@@ -478,9 +543,16 @@ Once this block is added, the AI invokes the commandlet automatically during rel
 
 ## Version
 
-Current version: **v1.5.0**
+Current version: **v1.9.0**
 
 The version is defined in `src/Source/UAssetJsonExporter/Public/UAssetJsonExporterVersion.h`, and is embedded in every exported JSON's `ExporterVersion` field.
+
+## Related Plugins
+
+| Plugin | What it does |
+|---|---|
+| [ue-map-utils](https://github.com/hchia93/ue-map-utils) | In-editor actor integrity audit, session change review, level context export |
+| [uasset-name-linter](https://github.com/hchia93/uasset-name-linter) | Naming convention validator for `.uasset` / `.umap`, INI buckets plus HTML report |
 
 ## License
 
