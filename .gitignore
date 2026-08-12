@@ -11,3 +11,7 @@ Thumbs.db
 .vscode/
 *.sln
 *.vcxproj*
+
+# Python
+__pycache__/
+*.pyc

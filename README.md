@@ -1,4 +1,4 @@
-# uasset-json-exporter
+# uasset-workbench
 
 **English** | [中文](README_CN.md)
 
@@ -6,141 +6,129 @@
 ![Unreal Engine 5](https://img.shields.io/badge/Unreal_Engine-5.7-blue?logo=unrealengine&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-Binary files can't be edited as text and are therefore hard to handle. This plugin exports Unreal Engine 5 assets into a structure an LLM can read, extracting just the context it needs.
+An editor plugin that lets scripts and AI agents operate on Unreal Engine 5 uassets non-interactively.
 
 ## What problem it solves
 
-The general problem: the information lives inside an app's interface, out of reach of code review, AI analysis, and automation.
+| Problem | How it shows up |
+| --- | --- |
+| Can't read | Logic and configuration are locked inside binary `.uasset` files, and an AI handed the file has nowhere to start. An EventGraph with hundreds of nodes has no readable text form, and abandoned variables, broken connections, wrong defaults are impossible to fully audit by eye in the editor. Montage notify timing, UMG hierarchy and keyframes, Niagara and material parameters, DataTable values, level actor placement and streaming config all exist only in the editor UI |
+| Can't write | Changing a UMG layout means dragging by hand in the editor, there is no version-controllable, replayable write path |
+| Can't fix after a rename | After a C++ or asset rename, CoreRedirects only fixes the call side. It cannot fix the implementation side or the consumer side inside Blueprint graphs, nor another level's import of the old path |
+| Can't audit | Broken references, level streaming topology, per-level component budget have no batch query entry point |
 
-Where this shows up in a UE project today: a lot of logic and configuration is locked inside binary `.uasset` files. When you ask an AI to help debug or refactor, you typically hit these walls:
+Four problems, four capability groups.
 
-- **"I can't open binary files"**: the AI cannot do anything with `.uasset` and kicks the problem back to you
-- **Blueprint is too large to C++-ify**: an EventGraph with hundreds of nodes has no readable text form, hand-translating node by node is slow and error-prone
-- **Dead code and misconfigurations inside blueprints**: abandoned variables, broken connections, wrong defaults left by the original creator are hard to fully audit by eye in the editor
-- **AnimMontage notify timing is hard to trace**: ANS trigger time, duration, parameters are scattered along the timeline and invisible from the code side
-- **Widget layout and animation live only in the editor**: UMG hierarchy, slot settings, keyframe sequences have no textual review surface
-- **VFX and material parameters are scattered across the editor**: Niagara emitter config, material node connections and parameter overrides have no unified textual review
-- **DataTable and DataAsset configuration is not searchable**: scrolling through a several-dozen-row data table in the editor is miserable
-- **Level (.umap) content is entirely binary**: actor layout, static mesh references, collision config, streaming levels, per-instance overrides have no readable text view
+## The four groups
 
-## How it works
+| Group | What it does | Output | Count |
+| --- | --- | --- | --- |
+| Export | Read uasset structure, write JSON | JSON under `Intermediate/UAssetExport` | 11 |
+| Import | Read a JSON spec, write back to the uasset | modified uassets | 1 |
+| Migrate | Fix references after a C++ or asset rename | modified uassets | 5 |
+| Audit | Read-only checks producing a report | report JSON | 2 |
 
-The same design works whether or not the host tool is open, and it keeps the exported text small enough for an AI to read quickly.
+The group is decided by the run name: suffix `Export` is the Export group, suffix `Import` is the Import group, prefix `Audit` is the Audit group, everything else is Migrate.
 
-The plugin walks each asset's internal structure and serializes it to JSON, which the AI reads as text. It is read-only and never modifies assets.
+## Routing and architecture
 
-v1.5.0 ships a two-pipeline design. The wrapper checks the heartbeat file `Saved/UAssetExportQueue/.alive` and routes automatically:
+Every operation converges on the same calling contract. The heartbeat file `Saved/UAssetExportQueue/.alive` decides the route.
 
-- **Editor open**: writes `pending/<uuid>.json`; an in-editor `UEditorSubsystem` consumes it in-process, drops the result in `done/<uuid>.json`, and surfaces a Slate toast in the editor. No need to close the editor.
-- **Editor closed**: launches `UnrealEditor-Cmd.exe` for the commandlet path. After `Main` returns the process often lingers (shader compile workers, DDC commit, module teardown); the wrapper watches output mtime and force-kills via `taskkill` once all files have been stable for N seconds (default 10).
+| Editor state | Which path | Feedback |
+| --- | --- | --- |
+| Open | Write a pending task, the in-editor subsystem runs it in-process | Export raises a bottom-right toast, the rest goes to the Message Log |
+| Closed | Launch `UnrealEditor-Cmd` to run the commandlet | log |
 
-Both paths produce identical output regardless of editor state. The exported JSON carries the full structure: nodes, connections, properties, defaults, and timeline markers. AI tools can grep and offset-read it on demand.
+Both paths produce identical output, the caller does not need to care whether the editor is open.
 
-## How it generalizes
+What the routing buys: the four groups share one call entry and one output convention, so workflows compose, export the structure, analyze offline, write back to the asset, audit to verify, instead of every added tool bringing its own way of being called. Adding a commandlet adds a capability, the contract does not change.
 
-UE is the proving ground; the three reusable parts don't depend on it.
+## Quick start
 
-| Reusable asset | What it is | Transfers to |
-|---|---|---|
-| Pattern | opaque binary -> AI-consumable structured text bridge | any GUI-locked proprietary format (DCC, CAD/BIM, EDA, simulation) |
-| Architecture | heartbeat-routed adaptive dual pipeline (live in-process vs headless) | any heavyweight host with both live and headless modes (Houdini/Maya/Blender/Revit/MATLAB) |
-| Serialization discipline | token-economy-aware export (delta-from-archetype, cap-and-sample, grep+offset reading contract) | context engineering for any LLM data pipeline |
+Wrapper: `src/scripts/run_commandlet.sh`, which sits at `Plugins/UAssetWorkbench/scripts/` once integrated into a project.
 
-## Comparison with UE MCP approaches
-
-The community offers another approach, UE MCP (e.g. `kvick-games/UnrealMCP`, `chongdashu/unreal-mcp`): it uses Remote Control / Python bridges to let AI manipulate assets and scenes at editor **runtime**. The two solve different problems and are not mutually exclusive.
-
-| Dimension | This plugin (Commandlet) | UE MCP (editor runtime) |
-|---|---|---|
-| Working mode | Offline JSON export, AI reads text | Online RPC, AI drives the editor directly |
-| Call paradigm | File-queue RPC (subsystem mode, MCP-aligned in principle) / process spawn (commandlet mode) | Online RPC (HTTP / Python bridge) |
-| Editor state | Adaptive: in-editor subsystem when open, commandlet when closed | Must be open |
-| Asset structure readout | Strong, full EdGraph / Pin / connection serialization | Weak, Remote Control cannot reach EdGraph detail |
-| Runtime state | None | Strong, can read PIE actors, selection, live properties |
-| Token cost | Controllable, grep + offset reads on demand | Uncontrollable, driven by RPC response size |
-| Suitable tasks | Static analysis, blueprint review, batch config audit | Scene building, PIE debugging, ad hoc parameter tweaks |
-| Reproducibility | High, JSON can be version-controlled and diffed | Low, depends on runtime context |
-
-**Selection guidance**:
-
-- Need AI to understand blueprint logic, trace notify timing, audit DataTable / DataAsset config → use this plugin
-- Need AI to spawn actors in PIE, change live parameters, read the current selection → use UE MCP
-- They can coexist: commandlet handles static structure, MCP handles dynamic state
-
-## Supported exporters
-
-| Commandlet | `-run=` name | What it exports |
-|---|---|---|
-| `BlueprintEdGraphExportCommandlet` | `BlueprintEdGraphExport` | Blueprint EdGraph nodes, pins, connections, variables, components, referenced assets |
-| `AnimMontageExportCommandlet` | `AnimMontageExport` | Montage sections, slots, ANS/AN placement and duration, notify custom parameters |
-| `WidgetLayoutExportCommandlet` | `WidgetLayoutExport` | Widget tree hierarchy, slot layout properties, subclass properties, animation keyframes, EdGraph |
-| `DataAssetExportCommandlet` | `DataAssetExport` | All custom properties of DataAsset subclasses, array elements expanded |
-| `DataTableExportCommandlet` | `DataTableExport` | DataTable row struct name, all row data (indexed by RowName) |
-| `NiagaraSystemExportCommandlet` | `NiagaraSystemExport` | Niagara system emitter list, spawn/update script parameters, renderer properties |
-| `MaterialExportCommandlet` | `MaterialExport` | Material node graph (expression connection chain), global settings; MaterialInstance parameter overrides |
-| `TextureExportCommandlet` | `TextureExport` | Texture asset properties via reflection (compression, sRGB, LOD group, mip settings, imported/source dimensions) |
-| `BehaviorTreeExportCommandlet` | `BehaviorTreeExport` | BT tree structure (Composite/Task/Decorator/Service), node parameters, Blackboard keys |
-| `AnimBlueprintExportCommandlet` | `AnimBlueprintExport` | AnimBP EdGraph, StateMachine (states/transitions/conditions/blend settings) |
-| `LevelExportCommandlet` | `LevelExport` | Level (.umap) actors / components, delta-from-archetype properties, collision / static mesh / ISM summary, streaming level configuration |
-
-## Usage
-
-### Recommended: invoke via wrapper script
-
-```bash
-bash scripts/run_commandlet.sh \
-    "<UE_PATH>" \
-    "<PROJECT_DIR>/YourProject.uproject" \
-    BlueprintEdGraphExport \
-    "/Game/Path/BP_A,/Game/Path/BP_B"
+```
+run_commandlet.sh <UE_PATH> <UPROJECT> <RunName> <AssetList> [IDLE_SEC] [MAX_SEC] [EXTRA_ARGS]
 ```
 
-The wrapper routes automatically based on the heartbeat (see [How it works](#how-it-works) above).
+| Argument | Meaning |
+| --- | --- |
+| `UE_PATH` | Engine install root |
+| `UPROJECT` | Absolute path to the `.uproject` |
+| `RunName` | The commandlet's run name |
+| `AssetList` | Comma-separated asset paths, the Audit group ignores it, pass an empty string |
+| `IDLE_SEC` | Output mtime quiet seconds the Export group uses to decide completion, default 10 |
+| `MAX_SEC` | Total wait cap, default 600 |
+| `EXTRA_ARGS` | Passed through to the commandlet |
 
-Optional arguments: `[IDLE_SEC] [MAX_SEC]`, default `10` and `600`. Exit code `0` = success, `1` = missing outputs or dispatch failure, `2` = argument error or editor conflict.
+Under Git Bash prefix with `MSYS_NO_PATHCONV=1`, otherwise `/Game/...` gets rewritten into a Windows path.
 
-### Native invocation
-
-```bash
-"<UE_PATH>/Engine/Binaries/Win64/UnrealEditor-Cmd.exe" \
-    "<PROJECT_DIR>/YourProject.uproject" \
-    -run=BlueprintEdGraphExport \
-    -assets="/Game/Path/BP_A,/Game/Path/BP_B" \
-    -nullrhi -nosplash -nosound
-```
-
-Replace the name after `-run=` with the exporter you need. All exporters share the same `-assets=` argument format.
-
-If running under Git Bash, prefix with `MSYS_NO_PATHCONV=1` to prevent `/Game/...` from being rewritten as a Windows path.
-
-With native invocation, if the process does not exit on its own, you must `taskkill` it manually. Otherwise the lingering process keeps `.uproject` locked and blocks subsequent operations.
-
-### Troubleshooting
-
-If the wrapper's heartbeat path hangs and the fallback commandlet process won't die after the wrapper's `taskkill`, Visual Studio is almost certainly holding the process. Don't tiptoe around it — kill it directly:
+Export.
 
 ```bash
-taskkill /F /IM UnrealEditor-Cmd.exe
+MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
+    "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject" \
+    BlueprintEdGraphExport "/Game/Blueprints/BP_Foo"
 ```
 
-Kill the offending Visual Studio process too if needed. A stuck `UnrealEditor-Cmd.exe` keeps `.uproject` locked and blocks every subsequent run.
+Import.
 
-### Output
+```bash
+MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
+    "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject" \
+    WidgetLayoutImport "/Game/UI/WBP_Foo" 10 600 \
+    '-spec="C:/temp/WBP_Foo.spec.json"'
+```
 
-Files are written to `<ProjectDir>/Intermediate/UAssetExport/<AssetPath>.json`, which stays out of version control.
+Migrate.
 
-Every JSON file contains `ExporterVersion` and `ExportType` fields identifying the exporter version and asset type.
+```bash
+MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
+    "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject" \
+    RedirectBlueprintEvent "/Game/Blueprints/BP_Foo" 10 600 \
+    '-OwnerClass="/Script/MyModule.MyActor" -OldEvent="OnPickedUp" -NewEvent="HandlePickedUp"'
+```
 
-### Output examples
+Audit.
+
+```bash
+MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
+    "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject" \
+    AuditLevelReference "" 10 600 \
+    '-scandir="/Game"'
+```
+
+## Groups in detail
+
+<details>
+<summary><b>Export</b>, 11 commandlets</summary>
+
+| RunName | What it exports |
+| --- | --- |
+| `BlueprintEdGraphExport` | Blueprint graphs, nodes, pins, connections, variables, components, referenced assets |
+| `AnimMontageExport` | Montage sections, slots, ANS/AN placement and duration, notify custom parameters |
+| `WidgetLayoutExport` | Widget tree, slot layout properties, subclass properties, animation keyframes, EdGraph |
+| `DataAssetExport` | All custom properties of DataAsset subclasses, array elements expanded |
+| `DataTableExport` | DataTable row struct name and all row data, indexed by RowName |
+| `NiagaraSystemExport` | Niagara emitter list, spawn/update script parameters, renderer properties |
+| `MaterialExport` | Material expression connection chain and global settings, MaterialInstance parameter overrides |
+| `TextureExport` | Texture properties, compression, sRGB, LOD group, mips, source dimensions |
+| `BehaviorTreeExport` | BT tree structure, node parameters, Blackboard keys |
+| `AnimBlueprintExport` | AnimBP EdGraph, state machine states, transitions, conditions, blend settings |
+| `LevelExport` | Level actors / components, delta-from-archetype properties, collision / static mesh / ISM summary, streaming levels |
+
+Output: `Intermediate/UAssetExport/<AssetPath>.json`, out of version control.
+
+Every JSON carries the two common fields `ExporterVersion` and `ExportType`, the rest expands per asset type.
 
 <details>
 <summary>Blueprint EdGraph</summary>
 
 ```json
 {
-    "ExporterVersion": "1.0.0",
+    "ExporterVersion": "2.0.0",
     "ExportType": "BlueprintEdGraph",
-    "Blueprint": "BP_PlayerController",
+    "Blueprint": "BP_Foo",
     "ParentClass": "PlayerController",
     "Variables": [
         { "Name": "DebugTimerHandle", "Type": "FTimerHandle" }
@@ -167,9 +155,9 @@ Every JSON file contains `ExporterVersion` and `ExportType` fields identifying t
 
 ```json
 {
-    "ExporterVersion": "1.0.0",
+    "ExporterVersion": "2.0.0",
     "ExportType": "AnimMontage",
-    "MontageName": "AM_Player_DashStrike_01",
+    "MontageName": "AM_Foo_Attack_01",
     "SequenceLength": 0.543,
     "Sections": [
         { "Name": "Default", "StartTime": 0 }
@@ -178,7 +166,7 @@ Every JSON file contains `ExporterVersion` and `ExportType` fields identifying t
         {
             "SlotName": "DefaultSlot",
             "Segments": [
-                { "AnimSequence": "AS_Player_DashStrike_01", "AnimPlayRate": 2 }
+                { "AnimSequence": "AS_Foo_Attack_01", "AnimPlayRate": 2 }
             ]
         }
     ],
@@ -204,9 +192,9 @@ Every JSON file contains `ExporterVersion` and `ExportType` fields identifying t
 
 ```json
 {
-    "ExporterVersion": "1.0.0",
+    "ExporterVersion": "2.0.0",
     "ExportType": "WidgetLayout",
-    "WidgetBlueprint": "WBP_PauseMenu",
+    "WidgetBlueprint": "WBP_Foo",
     "WidgetTree": {
         "Name": "CanvasPanel_36",
         "Class": "CanvasPanel",
@@ -236,9 +224,9 @@ Every JSON file contains `ExporterVersion` and `ExportType` fields identifying t
 
 ```json
 {
-    "ExporterVersion": "1.0.0",
+    "ExporterVersion": "2.0.0",
     "ExportType": "DataTable",
-    "DataTableName": "DT_PlayerAttributeInit",
+    "DataTableName": "DT_Foo",
     "RowStruct": "AttributeMetaData",
     "RowCount": 5,
     "Rows": {
@@ -263,9 +251,9 @@ Every JSON file contains `ExporterVersion` and `ExportType` fields identifying t
 
 ```json
 {
-    "ExporterVersion": "1.0.0",
+    "ExporterVersion": "2.0.0",
     "ExportType": "Material",
-    "MaterialName": "M_BatParticles",
+    "MaterialName": "M_Foo",
     "ShadingModel": "MSM_DefaultLit",
     "BlendMode": "BLEND_Translucent",
     "TwoSided": false,
@@ -289,12 +277,12 @@ Every JSON file contains `ExporterVersion` and `ExportType` fields identifying t
 }
 ```
 
-MaterialInstance exports the parameter override table:
+MaterialInstance exports the parameter override table.
 
 ```json
 {
     "ExportType": "MaterialInstance",
-    "Parent": "M_BaseMaterial",
+    "Parent": "M_Base",
     "ScalarParameters": [
         { "Name": "Roughness", "Value": 0.8 }
     ],
@@ -313,9 +301,9 @@ MaterialInstance exports the parameter override table:
 
 ```json
 {
-    "ExporterVersion": "1.1.0",
+    "ExporterVersion": "2.0.0",
     "ExportType": "Level",
-    "MapName": "L_Playground",
+    "LevelName": "L_Foo",
     "WorldSettings": {
         "Class": "WorldSettings",
         "DeltaProperties": {
@@ -324,7 +312,7 @@ MaterialInstance exports the parameter override table:
     },
     "StreamingLevels": [
         {
-            "PackageName": "/Game/Maps/L_PlaygroundMetrics",
+            "PackageName": "/Game/Maps/L_FooProps",
             "Class": "LevelStreamingAlwaysLoaded",
             "ShouldBeLoaded": true,
             "ShouldBeVisible": true
@@ -342,7 +330,7 @@ MaterialInstance exports the parameter override table:
                     "Name": "StaticMeshComponent0",
                     "Class": "/Script/Engine.StaticMeshComponent",
                     "Mobility": "Static",
-                    "StaticMesh": "/Game/Core/World/LevelPrototype/Meshes/SM_Cube.SM_Cube",
+                    "StaticMesh": "/Game/Meshes/SM_Cube.SM_Cube",
                     "CollisionProfile": "BlockAll",
                     "CollisionEnabled": "QueryAndPhysics",
                     "DeltaProperties": { "bUseDefaultCollision": "False" }
@@ -353,9 +341,9 @@ MaterialInstance exports the parameter override table:
 }
 ```
 
-Export strategy: every actor / component only serializes **properties that differ from its archetype (`UObject::GetArchetype()`)**, mirroring how `.umap` itself persists, for zero loss and maximum compression. Actors spawned from blueprints correctly align to the BPGC CDO, so "BP default" and "instance override" stay distinguishable.
+Export strategy: every actor / component serializes only the properties that differ from its own archetype (`UObject::GetArchetype()`), mirroring how `.umap` itself persists, lossless and at the highest compression rate. Blueprint-spawned actors align correctly to the BPGC CDO, so blueprint defaults and instance overrides remain distinguishable.
 
-For ISM / HISM / Foliage components with instance count > 200, only count + bounds + the first 5 samples are exported, to prevent a single foliage component from blowing up the file size.
+ISM / HISM / Foliage components with more than 200 instances export only the count, the bounds, and the first 5 samples, so a single foliage component cannot blow up the file.
 </details>
 
 <details>
@@ -363,9 +351,9 @@ For ISM / HISM / Foliage components with instance count > 200, only count + boun
 
 ```json
 {
-    "ExporterVersion": "1.0.0",
+    "ExporterVersion": "2.0.0",
     "ExportType": "NiagaraSystem",
-    "SystemName": "FXS_Alert",
+    "SystemName": "NS_Foo",
     "ExposedParameters": [],
     "Emitters": [
         {
@@ -389,98 +377,203 @@ For ISM / HISM / Foliage components with instance count > 200, only count + boun
 ```
 </details>
 
-### Reading strategy
+</details>
 
-The exported JSON can be very large (e.g. a complex PlayerCharacter blueprint can exceed 8000 lines). Recommended:
+<details>
+<summary><b>Import</b>, 1 commandlet</summary>
 
-1. Use grep to locate the node names, function names, or pin connections you care about
-2. Read the relevant range by line numbers, do not load the entire file at once
+`WidgetLayoutImport`, reads a JSON spec and writes the widget tree back into a Widget Blueprint, spec path goes through `-spec=`.
 
-## Integrating into your project
+Two top-level spec fields.
 
-### Option 1: as a project plugin
+| Field | Meaning |
+| --- | --- |
+| `AssetPath` | Asset path of the target Widget Blueprint |
+| `WidgetTree` | Root node, recursive from there |
 
-1. Copy the contents of `src/` into your project's `Plugins/UAssetJsonExporter/`
-2. Add to the `Plugins` array in `.uproject`:
+Node fields.
+
+| Field | Meaning |
+| --- | --- |
+| `Class` | Bare UMG class name such as `HorizontalBox`, or the full object path of a Blueprint class such as `/Game/UI/WBP_Bar.WBP_Bar_C` |
+| `Name` | Widget name, C++ `BindWidget` matches on it |
+| `Properties` | Property name to string value, applied through reflection `ImportText` |
+| `Slot` | The node's slot properties inside its parent container, also through `ImportText` |
+| `Children` | Child node array, the parent must be a panel type |
+
+Property value strings take the same form Export emits, e.g. `(Value=1.000000,SizeRule=Fill)`, `(Right=48.000000)`, `HAlign_Fill`.
+
+The behavior is whole-tree replacement, not incremental merge, so the spec must describe the complete tree. A `WidgetLayoutExport` output feeds straight back in as Import input, and the usual way to change a layout is Export the current tree, edit the JSON, Import it back.
 
 ```json
 {
-    "Name": "UAssetJsonExporter",
+  "AssetPath": "/Game/UI/WBP_Foo",
+  "WidgetTree": {
+    "Class": "HorizontalBox",
+    "Name": "RootBox",
+    "Children": [
+      {
+        "Class": "SizeBox",
+        "Name": "IconBox",
+        "Properties": {
+          "bOverride_WidthOverride": "True",
+          "WidthOverride": "64.000000"
+        },
+        "Slot": {
+          "Padding": "(Right=48.000000)",
+          "VerticalAlignment": "VAlign_Center"
+        },
+        "Children": [
+          {
+            "Class": "Image",
+            "Name": "Icon",
+            "Properties": {
+              "ColorAndOpacity": "(R=1.000000,G=1.000000,B=1.000000,A=1.000000)"
+            }
+          }
+        ]
+      },
+      {
+        "Class": "TextBlock",
+        "Name": "Label",
+        "Properties": {
+          "Text": "INVTEXT(\"Label\")"
+        },
+        "Slot": {
+          "Size": "(Value=1.000000,SizeRule=Fill)",
+          "HorizontalAlignment": "HAlign_Fill"
+        }
+      }
+    ]
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Migrate</b>, 5 commandlets</summary>
+
+CoreRedirects covers the call side only, the implementation side and the consumer side inside Blueprint graphs are out of its range. A renamed interface event degrades a BP override into an orphaned custom event and the event stops firing, a renamed delegate parameter leaves a dangling pin on the binding node. Both still compile, and neither is findable by eye in a large project.
+
+| RunName | What it does | Default |
+| --- | --- | --- |
+| `RedirectBlueprintEvent` | Reconnects a BP override that degraded into a custom event back to the new event, carrying its wiring across, and recognizes the `_N` dedup suffix UE appends | dry run |
+| `RedirectBlueprintPin` | Moves a binding node's wiring from the old output pin to the new pin, then reconstructs the node to drop the old pin, touching only nodes that carry both the old and the new pin | dry run |
+| `ReparentBlueprint` | Changes a Blueprint's parent class | writes directly |
+| `ResaveAsset` | Forces load, compile, save so load-time fixups land on disk, after which that CoreRedirect can be dropped, supports Blueprint and map | writes directly |
+| `SanitizeLevelReference` | Repoints every reference to an old asset inside a level at the new asset, then resaves that level | writes directly, `-dryrun` only counts |
+
+Both redirects scan only by default, listing each Blueprint, event or node hit and how many wire groups would move, then take `-apply` to compile and save once it looks right. A scan with zero hits warns, check the `-OwnerClass` and the old name spelling first.
+
+`SanitizeLevelReference` must run before the old asset is deleted. Repointing needs both the old and the new on disk, running it after the delete is too late.
+
+Modified uassets show up in the version control working copy afterwards.
+
+</details>
+
+<details>
+<summary><b>Audit</b>, 2 commandlets and 3 scripts</summary>
+
+| RunName | What it checks |
+| --- | --- |
+| `AuditLevelReference` | References inside level packages pointing at assets that no longer exist |
+| `AuditLevelTopology` | Streaming relationships between levels, which one is persistent, which one is a sublevel |
+
+`AuditLevelReference` walks the Asset Registry dependency graph and checks package existence one by one, it does not load worlds and saves no package. Existence resolves against the mounted content roots, so every plugin of the project must be enabled before the run, otherwise dependencies under an unmounted root come back as false breakage. Its paired operation is `SanitizeLevelReference` in the Migrate group, audit finds the breakage, sanitize fixes it.
+
+`AuditLevelTopology` assigns every level a role.
+
+| Role | Test |
+| --- | --- |
+| `Standalone` | No streaming levels, and not referenced by another level |
+| `PersistentHost` | Has streaming levels |
+| `Sublevel` | No streaming levels, but referenced by another level |
+
+Hosting outranks being hosted, a level that carries sublevels of its own is `PersistentHost` even when something else streams it in. The test is whether the level can be opened on its own to drive its sublevels, a copy of it living inside another level does not take that away, and `referenced_by` still records the nesting. Tools that need to drive streaming find the persistent level from this report instead of hardcoding a name into the script.
+
+Three companion scripts.
+
+| Script | What it does |
+| --- | --- |
+| `run_stream_metric.ps1` | Orchestration entry point for stream metric, one command covering topology, export, probe, report |
+| `stream_metric_report.py` | Joins probe timings with `LevelExport` scale by level name into one table, including load milliseconds per thousand components |
+| `level_budget_audit.py` | Reads `LevelExport` output offline into a component budget table, one row per level, flagging the ones over budget |
+
+`run_stream_metric.ps1` covers four steps in one command.
+
+1. Run `AuditLevelTopology` for the topology report, always executed, the target's sublevel list comes from it
+2. Run `LevelExport` on those sublevels for scale data, `-SkipExport` skips it
+3. Start an unattended editor measuring unload / gc / load wall-clock milliseconds and worst frame per sublevel
+4. Run `stream_metric_report.py` to join timings with scale into one printed table
+
+Without `-PersistentLevel` the script picks the single `PersistentHost` out of the topology report, and lists the candidates for an explicit pick when it finds more than one. The probe swaps `AlwaysLoaded` sublevels to `LevelStreamingDynamic` in memory so they can unload, and that step never saves. The editor must be closed before the run.
+
+</details>
+
+## Reading strategy
+
+The exported JSON can be very large, a Blueprint of moderate complexity already reaches several thousand lines.
+
+1. Grep first to locate the node titles, function names, widget names, or row names you care about
+2. Read by line range once you have the line numbers, do not pull the whole file into context
+
+```bash
+grep -n "OnHealthChanged" Intermediate/UAssetExport/Game/Blueprints/BP_Foo.json
+```
+
+## Why not the official toolchain
+
+The official entry points for AI and automation, MCP, Remote Control, the Python API, evolve along with the engine version, capability gaps open up, and some editor subsystems regress in particular versions. They cannot be assumed stable across versions, and UE6 is still some way off, the versions in between have to keep working.
+
+The workbench goes through commandlets plus stable engine APIs, routing around the layer that is still moving. The output is JSON files, version-controllable, diffable, replayable. When a mechanism the official path does not offer is needed, this is the extension point, adding a commandlet adds a capability and the calling contract does not change.
+
+Online interactive approaches, the kind driven at editor runtime, solve a different class of problem, scene building, PIE debugging, ad hoc parameter tweaks. The two are not mutually exclusive.
+
+## Integrating into your project
+
+Copy the contents of `src/` into the project's `Plugins/UAssetWorkbench/`, and add to the `Plugins` array in `.uproject`.
+
+```json
+{
+    "Name": "UAssetWorkbench",
     "Enabled": true
 }
 ```
 
-3. Regenerate project files and build
+Regenerate project files and build.
 
-### Option 2: as an engine plugin
+It can also live at `<UE_PATH>/Engine/Plugins/Editor/UAssetWorkbench/` to be shared by every project.
 
-Copy the contents of `src/` into `<UE_PATH>/Engine/Plugins/Editor/UAssetJsonExporter/`, shared by all projects.
+Prerequisites: Unreal Engine 5.7, and the plugin must be compiled with the project. Calling through the wrapper does not require closing the editor, launching the commandlet directly does.
 
-### Prerequisites
+## For AI agents
 
-- Unreal Engine 5.7
-- The project must be compiled with the plugin included
-- Calling via the wrapper does not require closing the editor. Calling the native commandlet directly still requires it, so the editor can release the `.uproject` lock
+| Doc | Contents |
+| --- | --- |
+| `Docs/AI-Guide.md` | Call manual for AI agents, decision table plus call templates plus common pitfalls |
+| `Docs/Export.md` | Export group detail |
+| `Docs/Import.md` | Import group detail and spec format |
+| `Docs/Migrate.md` | Migrate group detail |
+| `Docs/Audit.md` | Audit group detail and the stream metric workflow |
 
-## Using with Claude Code
+These docs are reference material for agents to read. Where behavior and documentation disagree, the source wins, the block comment at the top of each commandlet header carries the full contract.
 
-If you use [Claude Code](https://claude.ai/code) as your AI collaborator, add the following block to your project's `.claude/CLAUDE.md` so the AI knows this tool exists and how to use it:
+## How it generalizes
 
-```markdown
-## Tooling: UAsset Json Exporter
+UE is only the proving ground, the three reusable parts do not depend on it.
 
-Plugin: `Plugins/UAssetJsonExporter` (Editor-only)
-
-### Available Commandlets
-
-| Commandlet | Run Name | Description |
-|---|---|---|
-| BlueprintEdGraphExportCommandlet | `BlueprintEdGraphExport` | Blueprint graphs, nodes, pins, connections |
-| AnimMontageExportCommandlet | `AnimMontageExport` | Montage sections, slots, ANS/AN placement and parameters |
-| WidgetLayoutExportCommandlet | `WidgetLayoutExport` | Widget tree, layout, animations, EdGraph |
-| DataAssetExportCommandlet | `DataAssetExport` | DataAsset subclass properties |
-| DataTableExportCommandlet | `DataTableExport` | DataTable row struct and all row data |
-| NiagaraSystemExportCommandlet | `NiagaraSystemExport` | Niagara emitters, scripts, renderers |
-| MaterialExportCommandlet | `MaterialExport` | Material expressions and connections; MI parameter overrides |
-| TextureExportCommandlet | `TextureExport` | Texture asset properties via reflection (compression, sRGB, LOD group, mips, source dimensions) |
-| BehaviorTreeExportCommandlet | `BehaviorTreeExport` | BT tree structure, node parameters, Blackboard keys |
-| AnimBlueprintExportCommandlet | `AnimBlueprintExport` | AnimBP EdGraph, StateMachines (states, transitions, blend settings) |
-| LevelExportCommandlet | `LevelExport` | Level (.umap) actors / components, delta-from-archetype properties, collision / static mesh / ISM summary, streaming levels |
-
-### Usage
-
-bash Plugins/UAssetJsonExporter/scripts/run_commandlet.sh "<UE_PATH>" "Project.uproject" <RunName> "/Game/Path/Asset"
-
-Wrapper routes automatically by `Saved/UAssetExportQueue/.alive` heartbeat: editor open → in-editor subsystem (Slate toast feedback), editor closed → UnrealEditor-Cmd commandlet. Output format is identical either way.
-
-### Output
-
-`Intermediate/UAssetExport/<AssetPath>.json`
-
-### Reading Strategy
-
-Do NOT read the entire file at once. Instead:
-1. Use Grep to locate relevant node titles, function names, or pin connections.
-2. Use Read with offset/limit to inspect only the relevant sections.
-
-### When to Use
-
-- A task references a Blueprint/Widget and its internal logic is relevant
-- A bug may be in Blueprint wiring rather than C++
-- Need to verify variable defaults, component setup, or event flow
-- Need to check AnimMontage notify timing, DataAsset configuration, or material setup
-- Need to inspect Niagara emitter parameters or DataTable values
-- Need to understand BehaviorTree logic flow or AnimBP state machine transitions
-- Need to audit a Level: actor placements, static mesh / collision setup, streaming level config, per-instance overrides
-```
-
-Once this block is added, the AI invokes the commandlet automatically during relevant tasks to export and analyze the assets.
+| Reusable asset | What it is | Transfers to |
+| --- | --- | --- |
+| Pattern | bidirectional bridge between opaque binary and AI-readable structured text | any GUI-locked proprietary format, DCC / CAD / BIM / EDA / simulation |
+| Architecture | heartbeat-routed adaptive dual pipeline, live in-process and headless producing identical output | any heavyweight host with both an interactive and a headless mode, Houdini / Maya / Blender / Revit / MATLAB |
+| Serialization discipline | token-cost-aware export, delta-from-archetype, cap-and-sample on overflow, a grep plus range-read contract | context engineering for any LLM data pipeline |
 
 ## Version
 
-Current version: **v1.5.0**
+Current version: **2.0.0**
 
-The version is defined in `src/Source/UAssetJsonExporter/Public/UAssetJsonExporterVersion.h`, and is embedded in every exported JSON's `ExporterVersion` field.
+Defined in `src/Source/UAssetWorkbench/Public/UAssetWorkbenchVersion.h`, and embedded in the `ExporterVersion` field of every exported JSON.
 
 ## License
 

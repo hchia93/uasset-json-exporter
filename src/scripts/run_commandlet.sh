@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Wrapper for UAssetJsonExporter.
+# Wrapper for UAssetWorkbench.
 #
 # Routing:
 #   1. If <ProjectDir>/Saved/UAssetExportQueue/.alive is fresh (mtime within
@@ -17,14 +17,21 @@
 #   UPROJECT    Absolute path to the .uproject file
 #   RunName     Commandlet name, e.g. "BlueprintEdGraphExport"
 #   AssetList   Comma-separated asset paths, e.g. "/Game/Foo/BP_A,/Game/Bar/BP_B"
-#   IDLE_SEC    Commandlet path: seconds of mtime stability before kill. Default 10.
+#   IDLE_SEC    Export runs: seconds of output mtime stability before kill. Default 10.
 #   MAX_SEC     Absolute upper bound on total wait. Default 600.
-#   EXTRA_ARGS  Forwarded to the commandlet (e.g. "-graphs"). Default empty.
+#   EXTRA_ARGS  Forwarded to the commandlet, e.g. "-graphs" or "-spec=C:/path/spec.json". Default empty.
 #
-# Exit codes:
+# Run groups (same rule as the C++ side):
+#   *Export  produce JSON under Intermediate/UAssetExport, completion = every output present and settled
+#   *Import  write back into the asset, completion = process exit code
+#   Audit*   read-only reports, completion = process exit code
+#   others   migration / repair runs, completion = process exit code
+#
+# Exit codes (passed straight through from the commandlet):
 #   0 - success
-#   1 - one or more expected outputs missing / dispatch failure
-#   2 - bad invocation
+#   1 - failure, bad args, or an expected output is missing
+#   2 - bad invocation, or the editor is running and the run refused to fight it for the project lock
+#   3 - audit runs only: the run itself succeeded and the report lists something to fix
 
 set -u
 
@@ -42,6 +49,13 @@ ASSETS="$4"
 IDLE_SEC="${5:-10}"
 MAX_SEC="${6:-600}"
 EXTRA_ARGS="${7:-}"
+
+case "$RUN" in
+    *Export) GROUP="export" ;;
+    *Import) GROUP="import" ;;
+    Audit*)  GROUP="audit" ;;
+    *)       GROUP="migrate" ;;
+esac
 
 UE_CMD="$UE_PATH/Engine/Binaries/Win64/UnrealEditor-Cmd.exe"
 PROJECT_DIR="$(dirname "$UPROJECT")"
@@ -170,14 +184,16 @@ route_commandlet() {
     fi
 
     local A REL OUT
-    IFS=',' read -r -a ASSET_ARR <<< "$ASSETS"
     EXPECTED_FILES=()
-    for A in "${ASSET_ARR[@]}"; do
-        REL="${A#/}"
-        OUT="$EXPORT_ROOT/$REL.json"
-        EXPECTED_FILES+=("$OUT")
-        rm -f "$OUT"
-    done
+    if [ "$GROUP" = "export" ]; then
+        IFS=',' read -r -a ASSET_ARR <<< "$ASSETS"
+        for A in "${ASSET_ARR[@]}"; do
+            REL="${A#/}"
+            OUT="$EXPORT_ROOT/$REL.json"
+            EXPECTED_FILES+=("$OUT")
+            rm -f "$OUT"
+        done
+    fi
 
     local CMD_LOG="$QUEUE_ROOT/last_commandlet.log"
     mkdir -p "$QUEUE_ROOT"
@@ -199,6 +215,7 @@ route_commandlet() {
     local LAST_SIG=""
     local KILL_REASON=""
     local NOW SIG ALL_PRESENT F
+    local EXIT_RC=0
 
     while kill -0 "$PID" 2>/dev/null; do
         NOW=$(date +%s)
@@ -206,6 +223,12 @@ route_commandlet() {
         if [ $((NOW - START_TS)) -gt "$MAX_SEC" ]; then
             KILL_REASON="MAX_SEC ${MAX_SEC}s exceeded"
             break
+        fi
+
+        # Mutating runs leave no output file to watch, they are done when the process is done.
+        if [ "$GROUP" != "export" ]; then
+            sleep 1
+            continue
         fi
 
         SIG=""
@@ -241,17 +264,27 @@ route_commandlet() {
         if terminate_commandlet "$PID" "$WINPID"; then
             wait "$PID" 2>/dev/null
         fi
+        # A kill means the run never reported for itself, only export can call that a success.
+        if [ "$GROUP" != "export" ]; then
+            EXIT_RC=1
+        fi
     else
-        echo "[run_commandlet] PID=$PID exited on its own" >&2
+        wait "$PID" 2>/dev/null
+        EXIT_RC=$?
+        echo "[run_commandlet] PID=$PID exited on its own rc=$EXIT_RC" >&2
     fi
 
     local RC=0
-    for F in "${EXPECTED_FILES[@]}"; do
-        if [ ! -f "$F" ]; then
-            echo "[run_commandlet] missing output: $F" >&2
-            RC=1
-        fi
-    done
+    if [ "$GROUP" = "export" ]; then
+        for F in "${EXPECTED_FILES[@]}"; do
+            if [ ! -f "$F" ]; then
+                echo "[run_commandlet] missing output: $F" >&2
+                RC=1
+            fi
+        done
+    else
+        RC="$EXIT_RC"
+    fi
     if [ "$RC" -ne 0 ]; then
         echo "[run_commandlet] commandlet diagnostics (tail of $CMD_LOG):" >&2
         tail -n 40 "$CMD_LOG" >&2 2>/dev/null

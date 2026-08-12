@@ -1,4 +1,4 @@
-# uasset-json-exporter
+# uasset-workbench
 
 [English](README.md) | **中文**
 
@@ -6,141 +6,129 @@
 ![Unreal Engine 5](https://img.shields.io/badge/Unreal_Engine-5.7-blue?logo=unrealengine&logoColor=white)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-二进制文件没法当文本编辑，处理起来很麻烦。这个插件把 Unreal Engine 5 的资产导出成 LLM 能读懂的结构，只抽取它需要的那部分上下文。
+让脚本与 AI agent 能对 Unreal Engine 5 的 uasset 做非交互操作的编辑器插件。
 
 ## 它解决什么问题
 
-通用问题：信息锁在 GUI 工具里，代码审查、AI 分析和自动化都够不到。
+| 问题 | 具体表现 |
+| --- | --- |
+| 读不了 | 逻辑与配置锁在二进制 `.uasset` 里，AI 拿到文件也无从下手。上百节点的 EventGraph 没有可读的文本形态，蓝图里的废弃变量、断掉的连线、错误的默认值靠肉眼在编辑器里审不完。Montage 的 notify 时间点、UMG 的层级与关键帧、Niagara 与材质参数、DataTable 数值、level 的 actor 摆放与 streaming 配置，全都只在编辑器界面里存在 |
+| 改不了 | 要改 UMG 布局只能在编辑器里手工拖，没有可版本控制、可重放的写入路径 |
+| 改名后修不了 | C++ 或资产改名后，CoreRedirects 只能修调用侧，修不了 Blueprint 图里的实现侧与消费侧，也修不了别的 level 对旧路径的 import |
+| 审计不了 | 破损引用、level 的 streaming 拓扑、每个 level 的组件预算，没有批量查询的入口 |
 
-具体到当下的 UE 项目：大量逻辑和配置锁在二进制 `.uasset` 文件里。当你让 AI 协助调试或重构时，通常会遇到：
+四类问题对应四组能力。
 
-- **"我无法打开二进制文件"**，AI 对 `.uasset` 束手无策，只能把问题丢回给你
-- **蓝图过大，难以 C++ 化**，数百个节点的 EventGraph 没有可读的文本表示，人工逐节点翻译既慢又容易遗漏
-- **蓝图中的死代码和错误配置**，创建者留下的废弃变量、断开的连接、错误的默认值，肉眼在编辑器里很难全面排查
-- **AnimMontage 的 Notify 时序难以追踪**，ANS 的触发时间、持续时长、参数散落在时间轴上，代码侧看不到全貌
-- **Widget 布局和动画只存在于编辑器里**，UMG 的层级结构、Slot 设置、关键帧序列没有文本化的审查手段
-- **特效和材质参数分散在编辑器各处**，Niagara 的 Emitter 配置、Material 的节点连接和参数覆盖，没有统一的文本审查方式
-- **DataTable 和 DataAsset 的配置数据不可搜索**，几十行的数据表在编辑器里逐行翻看效率极低
-- **关卡（.umap）内容完全是二进制**，Actor 布局、StaticMesh 引用、碰撞配置、Streaming Level、per-instance 覆盖等没有可读的文本视图
+## 四组能力
 
-## 它如何工作
+| 组 | 做什么 | 产出 | 数量 |
+| --- | --- | --- | --- |
+| Export | 读 uasset 结构导出 JSON | `Intermediate/UAssetExport` 下的 JSON | 11 |
+| Import | 读 JSON spec 写回 uasset | 被修改的 uasset | 1 |
+| Migrate | C++ 或资产改名后修复引用 | 被修改的 uasset | 5 |
+| Audit | 只读检查产出报告 | 报告 JSON | 2 |
 
-同一套设计，编辑器开着或关着都能用，并且把导出文本压得足够小，让 AI 很快读完。
+组别由 run 名决定: 后缀 `Export` 是 Export 组，后缀 `Import` 是 Import 组，前缀 `Audit` 是 Audit 组，其余是 Migrate 组。
 
-插件遍历资产内部结构并序列化为 JSON，AI 直接读文本。只读取，不修改资产。
+## 通道与架构
 
-v1.5.0 双管线设计，wrapper 通过心跳文件 `Saved/UAssetExportQueue/.alive` 自动路由：
+所有操作收敛成同一套调用契约。heartbeat 文件 `Saved/UAssetExportQueue/.alive` 决定路由。
 
-- **编辑器开启**：写入 `pending/<uuid>.json`，由 in-editor `UEditorSubsystem` 同进程消化，结果落 `done/<uuid>.json`，编辑器右下角弹 Slate 通知反馈进度。无需关编辑器。
-- **编辑器关闭**：启动 `UnrealEditor-Cmd.exe` 走 commandlet 路径。`Main` 返回后进程常因 shader compile worker、DDC commit、模块卸载继续停留几十秒，wrapper 监控输出 JSON 的 mtime，所有文件稳定 N 秒（默认 10）后通过 `taskkill` 强制结束。
+| 编辑器状态 | 走哪条路 | 反馈 |
+| --- | --- | --- |
+| 开着 | 写 pending task，编辑器内的 subsystem 进程内执行 | Export 弹右下角 toast，其余进 Message Log |
+| 关着 | 起 `UnrealEditor-Cmd` 跑 commandlet | log |
 
-两条路径输出格式完全一致，调用方无需关心走哪条。导出 JSON 包含节点、连接、属性、默认值、时间轴标记等完整结构信息，AI 工具可以 grep + offset 按需读取。
+两条路产出一致，调用方不需要关心编辑器开没开。
 
-## 可迁移性
+这套路由的意义: 四组能力共享同一个调用入口和同一套产出约定，工作流可以按组合拼装，导出结构，离线分析，写回资产，审计验证，而不是每加一个工具就多一种调用方式。加一个 commandlet 就是加一个能力，契约不变。
 
-UE 只是首个落地场景，下面三项可复用资产并不依赖它。
+## 快速开始
 
-| 可复用资产 | 是什么 | 迁移到 |
-|---|---|---|
-| 模式 | 不透明二进制 -> AI 可消费结构化文本的桥接 | 任何被 GUI 锁定的私有格式（DCC、CAD/BIM、EDA、仿真） |
-| 架构 | 心跳路由的自适应双管线（存活同进程 vs 无头） | 任何同时具备存活与无头模式的重量级宿主（Houdini/Maya/Blender/Revit/MATLAB） |
-| 序列化纪律 | token 经济意识的导出（delta-from-archetype、cap-and-sample、grep+offset 读取契约） | 任何 LLM 数据管线的上下文工程 |
+Wrapper: `src/scripts/run_commandlet.sh`，集成进项目后位于 `Plugins/UAssetWorkbench/scripts/`。
 
-## 与 UE MCP 方案的对比
-
-社区中存在另一类方案：UE MCP（如 `kvick-games/UnrealMCP`、`chongdashu/unreal-mcp`），通过 Remote Control / Python 打通，让 AI 在 Editor **运行时** 操作资产和场景。两类方案解决不同问题，并非互斥。
-
-| 维度 | 本插件（Commandlet） | UE MCP（Editor 运行时） |
-|---|---|---|
-| 工作模式 | 离线导出 JSON，AI 读文本 | 在线 RPC，AI 直接操作 Editor |
-| 调用范式 | 文件队列 RPC（subsystem 模式，理论上契合 MCP）/ 进程启动（commandlet 模式） | 在线 RPC（HTTP / Python bridge） |
-| 编辑器状态 | 自适应：开启走 in-editor subsystem，关闭走 commandlet | 必须开启 |
-| 资产结构读取 | 强，EdGraph/Pin/连接完整序列化 | 弱，Remote Control 拿不到 EdGraph 细节 |
-| 运行时状态 | 无 | 强，可读 PIE 中的 actor、selection、live property |
-| Token 成本 | 可控，grep + offset 按需读取 | 不可控，取决于 RPC 返回体 |
-| 适合任务 | 静态分析、蓝图审查、批量配置核对 | 场景搭建、PIE 调试、临时调参验证 |
-| 可重复性 | 高，JSON 可入版本控制做 diff | 低，依赖运行时上下文 |
-
-**选型建议**：
-
-- 需要让 AI 理解蓝图逻辑、追踪 Notify 时序、核对 DataTable / DataAsset 配置 → 用本插件
-- 需要让 AI 在 PIE 中 spawn actor、改 live 参数、读当前选中对象 → 用 UE MCP
-- 两者可以并存，commandlet 负责静态结构，MCP 负责动态状态
-
-## 支持的 Exporter
-
-| Commandlet | `-run=` 名称 | 导出内容 |
-|---|---|---|
-| `BlueprintEdGraphExportCommandlet` | `BlueprintEdGraphExport` | Blueprint 的 EdGraph 节点、Pin、连接、变量、组件、引用资产 |
-| `AnimMontageExportCommandlet` | `AnimMontageExport` | Montage 的 Section、Slot、ANS/AN 位置与时长、Notify 自定义参数 |
-| `WidgetLayoutExportCommandlet` | `WidgetLayoutExport` | Widget 的树形层级、Slot 布局属性、子类属性、动画关键帧、EdGraph |
-| `DataAssetExportCommandlet` | `DataAssetExport` | DataAsset 子类的所有自定义属性，含数组元素展开 |
-| `DataTableExportCommandlet` | `DataTableExport` | DataTable 的行结构名称、所有行数据（按 RowName 索引） |
-| `NiagaraSystemExportCommandlet` | `NiagaraSystemExport` | Niagara System 的 Emitter 列表、Spawn/Update 脚本参数、Renderer 属性 |
-| `MaterialExportCommandlet` | `MaterialExport` | Material 节点图（Expression 连接链）、全局设置；MaterialInstance 参数覆盖表 |
-| `TextureExportCommandlet` | `TextureExport` | 通过反射导出 Texture 资产属性（压缩设置、sRGB、LOD 组、mip 设置、导入/源尺寸） |
-| `BehaviorTreeExportCommandlet` | `BehaviorTreeExport` | BT 树结构（Composite/Task/Decorator/Service）、节点参数、Blackboard Keys |
-| `AnimBlueprintExportCommandlet` | `AnimBlueprintExport` | AnimBP 的 EdGraph、StateMachine（States/Transitions/条件规则/Blend 设置） |
-| `LevelExportCommandlet` | `LevelExport` | Level（.umap）中的 Actor / Component、delta-from-archetype 属性、碰撞 / StaticMesh / ISM 摘要、Streaming Level 配置 |
-
-## 使用方法
-
-### 推荐：通过 wrapper 脚本调用
-
-```bash
-bash scripts/run_commandlet.sh \
-    "<UE_PATH>" \
-    "<PROJECT_DIR>/YourProject.uproject" \
-    BlueprintEdGraphExport \
-    "/Game/Path/BP_A,/Game/Path/BP_B"
+```
+run_commandlet.sh <UE_PATH> <UPROJECT> <RunName> <AssetList> [IDLE_SEC] [MAX_SEC] [EXTRA_ARGS]
 ```
 
-Wrapper 按心跳自动路由（详见前文 [它如何工作](#它如何工作)）。
+| 参数 | 说明 |
+| --- | --- |
+| `UE_PATH` | 引擎安装根目录 |
+| `UPROJECT` | `.uproject` 的绝对路径 |
+| `RunName` | commandlet 的 run 名 |
+| `AssetList` | 逗号分隔的资产路径，Audit 组不吃它，传空串 |
+| `IDLE_SEC` | Export 组判定完成用的输出 mtime 静默秒数，默认 10 |
+| `MAX_SEC` | 总等待上限，默认 600 |
+| `EXTRA_ARGS` | 透传给 commandlet 的参数 |
 
-可选参数：`[IDLE_SEC] [MAX_SEC]`，默认 `10` 和 `600`。退出码 `0` 表示成功，`1` 表示输出缺失或 dispatch 失败，`2` 表示调用参数错误或与编辑器冲突。
+Git Bash 下要加 `MSYS_NO_PATHCONV=1` 前缀，否则 `/Game/...` 会被改写成 Windows 路径。
 
-### 原生调用
-
-```bash
-"<UE_PATH>/Engine/Binaries/Win64/UnrealEditor-Cmd.exe" \
-    "<PROJECT_DIR>/YourProject.uproject" \
-    -run=BlueprintEdGraphExport \
-    -assets="/Game/Path/BP_A,/Game/Path/BP_B" \
-    -nullrhi -nosplash -nosound
-```
-
-将 `-run=` 后的名称替换为你需要的 Exporter。所有 Exporter 共享相同的 `-assets=` 参数格式。
-
-如果在 Git Bash 中运行，需要加 `MSYS_NO_PATHCONV=1` 前缀，防止 `/Game/...` 被转换为 Windows 路径。
-
-使用原生调用时，若发现进程未自行退出，需要自行通过 `taskkill` 清理，否则会锁住 `.uproject` 文件影响后续操作。
-
-### 故障处理
-
-若 wrapper 的心跳路径无响应，且 fallback commandlet 进程在 wrapper `taskkill` 后仍然杀不掉，几乎可以确定是 Visual Studio 持有该进程。不要犹豫，直接强杀：
+Export。
 
 ```bash
-taskkill /F /IM UnrealEditor-Cmd.exe
+MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
+    "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject" \
+    BlueprintEdGraphExport "/Game/Blueprints/BP_Foo"
 ```
 
-必要时连同相关 Visual Studio 进程一起杀。卡死的 `UnrealEditor-Cmd.exe` 会持续锁住 `.uproject`，影响后续所有调用。
+Import。
 
-### 输出
+```bash
+MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
+    "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject" \
+    WidgetLayoutImport "/Game/UI/WBP_Foo" 10 600 \
+    '-spec="C:/temp/WBP_Foo.spec.json"'
+```
 
-文件输出到 `<ProjectDir>/Intermediate/UAssetExport/<AssetPath>.json`，不会进入版本控制。
+Migrate。
 
-每个 JSON 文件都包含 `ExporterVersion` 和 `ExportType` 字段，标识导出器版本和资产类型。
+```bash
+MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
+    "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject" \
+    RedirectBlueprintEvent "/Game/Blueprints/BP_Foo" 10 600 \
+    '-OwnerClass="/Script/MyModule.MyActor" -OldEvent="OnPickedUp" -NewEvent="HandlePickedUp"'
+```
 
-### 输出示例
+Audit。
+
+```bash
+MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
+    "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject" \
+    AuditLevelReference "" 10 600 \
+    '-scandir="/Game"'
+```
+
+## 各组详解
+
+<details>
+<summary><b>Export</b>，11 个 commandlet</summary>
+
+| RunName | 导出内容 |
+| --- | --- |
+| `BlueprintEdGraphExport` | Blueprint 图、节点、pin、连线、变量、组件、引用资产 |
+| `AnimMontageExport` | Montage section、slot、ANS/AN 位置与时长、notify 自定义参数 |
+| `WidgetLayoutExport` | Widget 树、slot 布局属性、子类属性、动画关键帧、EdGraph |
+| `DataAssetExport` | DataAsset 子类的全部自定义属性，数组元素展开 |
+| `DataTableExport` | DataTable 行结构名与全部行数据，按 RowName 索引 |
+| `NiagaraSystemExport` | Niagara emitter 列表、spawn/update script 参数、renderer 属性 |
+| `MaterialExport` | Material 表达式连线链与全局设置，MaterialInstance 的参数覆写 |
+| `TextureExport` | Texture 属性，压缩、sRGB、LOD group、mip、源尺寸 |
+| `BehaviorTreeExport` | BT 树结构、节点参数、Blackboard key |
+| `AnimBlueprintExport` | AnimBP EdGraph、状态机的状态、转换、条件、blend 设置 |
+| `LevelExport` | Level 的 actor / component、与 archetype 的差异属性、碰撞与静态网格与 ISM 摘要、streaming level |
+
+输出: `Intermediate/UAssetExport/<AssetPath>.json`，不入版本控制。
+
+每份 JSON 都带 `ExporterVersion` 与 `ExportType` 两个通用字段，其余按资产类型展开。
 
 <details>
 <summary>Blueprint EdGraph</summary>
 
 ```json
 {
-    "ExporterVersion": "1.0.0",
+    "ExporterVersion": "2.0.0",
     "ExportType": "BlueprintEdGraph",
-    "Blueprint": "BP_PlayerController",
+    "Blueprint": "BP_Foo",
     "ParentClass": "PlayerController",
     "Variables": [
         { "Name": "DebugTimerHandle", "Type": "FTimerHandle" }
@@ -167,9 +155,9 @@ taskkill /F /IM UnrealEditor-Cmd.exe
 
 ```json
 {
-    "ExporterVersion": "1.0.0",
+    "ExporterVersion": "2.0.0",
     "ExportType": "AnimMontage",
-    "MontageName": "AM_Player_DashStrike_01",
+    "MontageName": "AM_Foo_Attack_01",
     "SequenceLength": 0.543,
     "Sections": [
         { "Name": "Default", "StartTime": 0 }
@@ -178,7 +166,7 @@ taskkill /F /IM UnrealEditor-Cmd.exe
         {
             "SlotName": "DefaultSlot",
             "Segments": [
-                { "AnimSequence": "AS_Player_DashStrike_01", "AnimPlayRate": 2 }
+                { "AnimSequence": "AS_Foo_Attack_01", "AnimPlayRate": 2 }
             ]
         }
     ],
@@ -204,9 +192,9 @@ taskkill /F /IM UnrealEditor-Cmd.exe
 
 ```json
 {
-    "ExporterVersion": "1.0.0",
+    "ExporterVersion": "2.0.0",
     "ExportType": "WidgetLayout",
-    "WidgetBlueprint": "WBP_PauseMenu",
+    "WidgetBlueprint": "WBP_Foo",
     "WidgetTree": {
         "Name": "CanvasPanel_36",
         "Class": "CanvasPanel",
@@ -236,9 +224,9 @@ taskkill /F /IM UnrealEditor-Cmd.exe
 
 ```json
 {
-    "ExporterVersion": "1.0.0",
+    "ExporterVersion": "2.0.0",
     "ExportType": "DataTable",
-    "DataTableName": "DT_PlayerAttributeInit",
+    "DataTableName": "DT_Foo",
     "RowStruct": "AttributeMetaData",
     "RowCount": 5,
     "Rows": {
@@ -263,9 +251,9 @@ taskkill /F /IM UnrealEditor-Cmd.exe
 
 ```json
 {
-    "ExporterVersion": "1.0.0",
+    "ExporterVersion": "2.0.0",
     "ExportType": "Material",
-    "MaterialName": "M_BatParticles",
+    "MaterialName": "M_Foo",
     "ShadingModel": "MSM_DefaultLit",
     "BlendMode": "BLEND_Translucent",
     "TwoSided": false,
@@ -289,12 +277,12 @@ taskkill /F /IM UnrealEditor-Cmd.exe
 }
 ```
 
-MaterialInstance 导出参数覆盖表：
+MaterialInstance 导出参数覆写表。
 
 ```json
 {
     "ExportType": "MaterialInstance",
-    "Parent": "M_BaseMaterial",
+    "Parent": "M_Base",
     "ScalarParameters": [
         { "Name": "Roughness", "Value": 0.8 }
     ],
@@ -313,9 +301,9 @@ MaterialInstance 导出参数覆盖表：
 
 ```json
 {
-    "ExporterVersion": "1.1.0",
+    "ExporterVersion": "2.0.0",
     "ExportType": "Level",
-    "MapName": "L_Playground",
+    "LevelName": "L_Foo",
     "WorldSettings": {
         "Class": "WorldSettings",
         "DeltaProperties": {
@@ -324,7 +312,7 @@ MaterialInstance 导出参数覆盖表：
     },
     "StreamingLevels": [
         {
-            "PackageName": "/Game/Maps/L_PlaygroundMetrics",
+            "PackageName": "/Game/Maps/L_FooProps",
             "Class": "LevelStreamingAlwaysLoaded",
             "ShouldBeLoaded": true,
             "ShouldBeVisible": true
@@ -342,7 +330,7 @@ MaterialInstance 导出参数覆盖表：
                     "Name": "StaticMeshComponent0",
                     "Class": "/Script/Engine.StaticMeshComponent",
                     "Mobility": "Static",
-                    "StaticMesh": "/Game/Core/World/LevelPrototype/Meshes/SM_Cube.SM_Cube",
+                    "StaticMesh": "/Game/Meshes/SM_Cube.SM_Cube",
                     "CollisionProfile": "BlockAll",
                     "CollisionEnabled": "QueryAndPhysics",
                     "DeltaProperties": { "bUseDefaultCollision": "False" }
@@ -353,9 +341,9 @@ MaterialInstance 导出参数覆盖表：
 }
 ```
 
-导出策略：每个 Actor / Component 只序列化 **相对其 Archetype (`UObject::GetArchetype()`) 有差异的属性**，镜像 `.umap` 自身的持久化契约，零漏失 + 最大压缩。BP 生成的 Actor 会正确对齐到 BPGC CDO，区分"BP 默认"和"实例 override"。
+导出策略: 每个 actor / component 只序列化与自身 archetype（`UObject::GetArchetype()`）不同的属性，跟 `.umap` 本身的持久化方式一致，无损且压缩率最高。蓝图生成的 actor 会正确对齐到 BPGC CDO，蓝图默认值与实例覆写因此仍然可以区分。
 
-ISM / HISM / Foliage 组件若实例数 > 200，只导出 count + bounds + 前 5 个采样，避免单个 foliage component 爆炸文件体积。
+ISM / HISM / Foliage 组件的实例数超过 200 时只导出数量、包围盒与前 5 个采样，避免单个植被组件撑爆文件。
 </details>
 
 <details>
@@ -363,9 +351,9 @@ ISM / HISM / Foliage 组件若实例数 > 200，只导出 count + bounds + 前 5
 
 ```json
 {
-    "ExporterVersion": "1.0.0",
+    "ExporterVersion": "2.0.0",
     "ExportType": "NiagaraSystem",
-    "SystemName": "FXS_Alert",
+    "SystemName": "NS_Foo",
     "ExposedParameters": [],
     "Emitters": [
         {
@@ -389,98 +377,203 @@ ISM / HISM / Foliage 组件若实例数 > 200，只导出 count + bounds + 前 5
 ```
 </details>
 
-### 读取策略
+</details>
 
-导出的 JSON 可能非常大（例如一个复杂的 PlayerCharacter 蓝图可以超过 8000 行）。建议：
+<details>
+<summary><b>Import</b>，1 个 commandlet</summary>
 
-1. 用 grep 定位你关心的节点名称、函数名或 Pin 连接
-2. 按行号范围读取相关段落，不要一次性加载整个文件
+`WidgetLayoutImport`，读 JSON spec 把控件树写回 Widget Blueprint，spec 路径走 `-spec=`。
 
-## 集成到你的项目
+spec 顶层两个字段。
 
-### 方式 1：作为项目插件
+| 字段 | 含义 |
+| --- | --- |
+| `AssetPath` | 目标 Widget Blueprint 的资产路径 |
+| `WidgetTree` | 根节点，往下递归 |
 
-1. 将 `src/` 目录下的内容复制到你项目的 `Plugins/UAssetJsonExporter/`
-2. 在 `.uproject` 的 `Plugins` 数组中添加：
+节点字段。
+
+| 字段 | 含义 |
+| --- | --- |
+| `Class` | 裸 UMG 类名如 `HorizontalBox`，或 Blueprint 类的完整对象路径如 `/Game/UI/WBP_Bar.WBP_Bar_C` |
+| `Name` | 控件名，C++ 的 `BindWidget` 靠它匹配 |
+| `Properties` | 属性名到字符串值，走反射 `ImportText` |
+| `Slot` | 该节点在父容器里的 slot 属性，同样走 `ImportText` |
+| `Children` | 子节点数组，父节点必须是 panel 类型 |
+
+属性值的字符串形态就是 Export 导出的那种，例 `(Value=1.000000,SizeRule=Fill)`、`(Right=48.000000)`、`HAlign_Fill`。
+
+行为是整树替换，不是增量合并，spec 必须描述完整的树。`WidgetLayoutExport` 的产物可以直接当 Import 的输入，改布局的常规做法是先 Export 拿到当前树，改 JSON，再 Import 写回。
 
 ```json
 {
-    "Name": "UAssetJsonExporter",
+  "AssetPath": "/Game/UI/WBP_Foo",
+  "WidgetTree": {
+    "Class": "HorizontalBox",
+    "Name": "RootBox",
+    "Children": [
+      {
+        "Class": "SizeBox",
+        "Name": "IconBox",
+        "Properties": {
+          "bOverride_WidthOverride": "True",
+          "WidthOverride": "64.000000"
+        },
+        "Slot": {
+          "Padding": "(Right=48.000000)",
+          "VerticalAlignment": "VAlign_Center"
+        },
+        "Children": [
+          {
+            "Class": "Image",
+            "Name": "Icon",
+            "Properties": {
+              "ColorAndOpacity": "(R=1.000000,G=1.000000,B=1.000000,A=1.000000)"
+            }
+          }
+        ]
+      },
+      {
+        "Class": "TextBlock",
+        "Name": "Label",
+        "Properties": {
+          "Text": "INVTEXT(\"Label\")"
+        },
+        "Slot": {
+          "Size": "(Value=1.000000,SizeRule=Fill)",
+          "HorizontalAlignment": "HAlign_Fill"
+        }
+      }
+    ]
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Migrate</b>，5 个 commandlet</summary>
+
+CoreRedirects 只覆盖调用侧，Blueprint 图里的实现侧与消费侧不在它的射程内。改名的 interface event 会让 BP override 退化成孤立的 custom event，事件不再触发；改名的 delegate 参数会在绑定节点上留下悬空 pin。两类都编译得过去，靠人眼在大项目里扫不出来。
+
+| RunName | 做什么 | 默认行为 |
+| --- | --- | --- |
+| `RedirectBlueprintEvent` | 把退化成 custom event 的 BP override 重新接回新事件，连线一并搬过去，能识别 UE 加的 `_N` 去重后缀 | dry run |
+| `RedirectBlueprintPin` | 把绑定节点的连线从旧输出 pin 移到新 pin，再重建节点丢掉旧 pin，只处理同时带有新旧两个 pin 的节点 | dry run |
+| `ReparentBlueprint` | 改 Blueprint 的父类 | 直接落盘 |
+| `ResaveAsset` | 强制 load、compile、save，让 load 期的 fixup 落盘，之后就能撤掉那条 CoreRedirect，支持 Blueprint 与 map | 直接落盘 |
+| `SanitizeLevelReference` | 把 level 里对旧资产的每一处引用换成新资产，然后 resave 这个 level | 直接落盘，`-dryrun` 只统计 |
+
+两个 redirect 默认只扫描，逐条列出命中的 Blueprint、事件或节点、以及会搬多少组连线，确认无误再补 `-apply` 编译并保存。扫描一条都没命中时会给 warning，先核对 `-OwnerClass` 与旧名拼写。
+
+`SanitizeLevelReference` 必须在删除旧资产之前跑。换指针需要新旧两边都还在磁盘上，删完再跑就来不及了。
+
+执行后被改动的 uasset 会出现在版本控制的工作副本里。
+
+</details>
+
+<details>
+<summary><b>Audit</b>，2 个 commandlet 与 3 个脚本</summary>
+
+| RunName | 检查什么 |
+| --- | --- |
+| `AuditLevelReference` | level 包里指向已不存在资产的引用 |
+| `AuditLevelTopology` | level 之间的 streaming 关系，谁是 persistent，谁是 sublevel |
+
+`AuditLevelReference` 走 Asset Registry 的依赖图逐个判断包是否存在，不 load world，不保存任何包。包是否存在按已挂载的 content root 解析，所以跑之前必须让项目的插件全部启用，否则未挂载 root 下的依赖会被判成假破损。它的配对操作是 Migrate 组的 `SanitizeLevelReference`，audit 找出破损，sanitize 修。
+
+`AuditLevelTopology` 给每个 level 分角色。
+
+| 角色 | 判定 |
+| --- | --- |
+| `Standalone` | 没有 streaming levels，也不被别的 level 引用 |
+| `PersistentHost` | 有 streaming levels |
+| `Sublevel` | 没有 streaming levels，但被别的 level 引用 |
+
+hosting 优先于被 hosted，一个 level 只要自己挂着 sublevel 就是 `PersistentHost`，哪怕它同时被别的 level 引用。判据是它能不能被独立打开来驱动自己的 sublevel，被复制一份塞进别的 level 里不影响这一点，嵌套关系由 `referenced_by` 照常记录。需要驱动 streaming 的工具靠这份报告找 persistent level，不必再把名字硬编码进脚本。
+
+配套脚本三个。
+
+| 脚本 | 做什么 |
+| --- | --- |
+| `run_stream_metric.ps1` | stream metric 的编排入口，一条命令跑完拓扑、导出、探针、出表 |
+| `stream_metric_report.py` | 把探针耗时与 `LevelExport` 的规模按 level 名合并成表，附每千组件的加载毫秒 |
+| `level_budget_audit.py` | 离线读 `LevelExport` 的产物出组件预算表，每个 level 一行，标出超预算的 |
+
+`run_stream_metric.ps1` 一条命令跑完四步。
+
+1. 跑 `AuditLevelTopology` 出拓扑报告，这一步总是执行，目标的 sublevel 列表要从报告里拿
+2. 对那些 sublevel 跑 `LevelExport` 拿规模数据，`-SkipExport` 可跳过
+3. 起 unattended 编辑器逐 sublevel 测 unload / gc / load 墙钟毫秒与最差帧
+4. 跑 `stream_metric_report.py` 把耗时与规模合并成表打印
+
+没给 `-PersistentLevel` 时脚本从拓扑报告里找唯一的 `PersistentHost`，找到多个就列出候选要求显式指定。探针把 `AlwaysLoaded` 的 sublevel 在内存里换成 `LevelStreamingDynamic` 才能卸载，这一步永远不保存。跑之前编辑器必须关闭。
+
+</details>
+
+## 读取策略
+
+导出的 JSON 可能非常大，一个中等复杂度的 Blueprint 就能到几千行。
+
+1. 先 grep 定位关心的节点标题、函数名、控件名、行名
+2. 拿到行号后按区间读，不要整份读进上下文
+
+```bash
+grep -n "OnHealthChanged" Intermediate/UAssetExport/Game/Blueprints/BP_Foo.json
+```
+
+## 为什么不依赖官方工具链
+
+官方给 AI 与自动化的入口，MCP、Remote Control、Python API，随引擎版本演进，能力有空窗，某些编辑器子系统在特定版本会出现回归。跨版本不能假设它们稳定，而 UE6 还有一段距离，中间的版本要照常干活。
+
+workbench 走 commandlet 加引擎稳定 API，绕开正在演进的那一层。产出是 JSON 文件，可版本控制、可 diff、可重放。需要官方没有提供的机制时，这里就是扩展点，加一个 commandlet 就是加一个能力，调用契约不变。
+
+在线交互式方案，也就是在编辑器运行时驱动的那一类，解决的是另一类问题，场景搭建、PIE 调试、即时参数微调。两者不互斥。
+
+## 集成到你的项目
+
+把 `src/` 的内容复制到项目的 `Plugins/UAssetWorkbench/`，在 `.uproject` 的 `Plugins` 数组加。
+
+```json
+{
+    "Name": "UAssetWorkbench",
     "Enabled": true
 }
 ```
 
-3. 重新生成项目文件并编译
+重新生成工程文件并编译。
 
-### 方式 2：作为引擎插件
+也可以放 `<UE_PATH>/Engine/Plugins/Editor/UAssetWorkbench/` 让所有项目共享。
 
-将 `src/` 目录下的内容复制到 `<UE_PATH>/Engine/Plugins/Editor/UAssetJsonExporter/`，所有项目共享。
+前置: Unreal Engine 5.7，插件必须随项目编译。走 wrapper 调用不需要关编辑器，直接起 commandlet 才需要。
 
-### 前置条件
+## 给 AI agent 用
 
-- Unreal Engine 5.7
-- 项目必须已编译且包含该插件
-- 通过 wrapper 调用时无需关闭编辑器；直接调原生 commandlet 仍需关闭编辑器以释放 `.uproject` 锁
+| 文档 | 内容 |
+| --- | --- |
+| `Docs/AI-Guide.md` | 给 AI agent 的调用手册，决策表加调用模板加常见坑 |
+| `Docs/Export.md` | Export 组明细 |
+| `Docs/Import.md` | Import 组明细与 spec 格式 |
+| `Docs/Migrate.md` | Migrate 组明细 |
+| `Docs/Audit.md` | Audit 组明细与 stream metric 工作流 |
 
-## 配合 Claude Code 使用
+这些文档是给 agent 读的参考。调用行为与文档描述不符时以源码为准，每个 commandlet header 顶部的块注释写了完整契约。
 
-如果你使用 [Claude Code](https://claude.ai/code) 作为 AI 协作工具，可以在项目的 `.claude/CLAUDE.md` 中添加以下段落，让 AI 知道这个工具的存在和用法：
+## 泛化
 
-```markdown
-## Tooling: UAsset Json Exporter
+UE 只是验证场，三样可复用的东西不依赖它。
 
-Plugin: `Plugins/UAssetJsonExporter` (Editor-only)
-
-### Available Commandlets
-
-| Commandlet | Run Name | Description |
-|---|---|---|
-| BlueprintEdGraphExportCommandlet | `BlueprintEdGraphExport` | Blueprint graphs, nodes, pins, connections |
-| AnimMontageExportCommandlet | `AnimMontageExport` | Montage sections, slots, ANS/AN placement and parameters |
-| WidgetLayoutExportCommandlet | `WidgetLayoutExport` | Widget tree, layout, animations, EdGraph |
-| DataAssetExportCommandlet | `DataAssetExport` | DataAsset subclass properties |
-| DataTableExportCommandlet | `DataTableExport` | DataTable row struct and all row data |
-| NiagaraSystemExportCommandlet | `NiagaraSystemExport` | Niagara emitters, scripts, renderers |
-| MaterialExportCommandlet | `MaterialExport` | Material expressions and connections; MI parameter overrides |
-| TextureExportCommandlet | `TextureExport` | 通过反射导出 Texture 资产属性（压缩设置、sRGB、LOD 组、mip、源尺寸） |
-| BehaviorTreeExportCommandlet | `BehaviorTreeExport` | BT tree structure, node parameters, Blackboard keys |
-| AnimBlueprintExportCommandlet | `AnimBlueprintExport` | AnimBP EdGraph, StateMachines (states, transitions, blend settings) |
-| LevelExportCommandlet | `LevelExport` | Level (.umap) actors / components, delta-from-archetype properties, collision / static mesh / ISM summary, streaming levels |
-
-### Usage
-
-bash Plugins/UAssetJsonExporter/scripts/run_commandlet.sh "<UE_PATH>" "Project.uproject" <RunName> "/Game/Path/Asset"
-
-Wrapper routes automatically by `Saved/UAssetExportQueue/.alive` heartbeat: editor open → in-editor subsystem (Slate toast feedback), editor closed → UnrealEditor-Cmd commandlet. Output format is identical either way.
-
-### Output
-
-`Intermediate/UAssetExport/<AssetPath>.json`
-
-### Reading Strategy
-
-Do NOT read the entire file at once. Instead:
-1. Use Grep to locate relevant node titles, function names, or pin connections.
-2. Use Read with offset/limit to inspect only the relevant sections.
-
-### When to Use
-
-- A task references a Blueprint/Widget and its internal logic is relevant
-- A bug may be in Blueprint wiring rather than C++
-- Need to verify variable defaults, component setup, or event flow
-- Need to check AnimMontage notify timing, DataAsset configuration, or material setup
-- Need to inspect Niagara emitter parameters or DataTable values
-- Need to understand BehaviorTree logic flow or AnimBP state machine transitions
-- Need to audit a Level: actor placements, static mesh / collision setup, streaming level config, per-instance overrides
-```
-
-AI 会在相关任务中自动调用 Commandlet 导出并分析资产内容。
+| 可复用的东西 | 是什么 | 可迁移到 |
+| --- | --- | --- |
+| 模式 | 不透明二进制与 AI 可读结构化文本之间的双向桥 | 任何被 GUI 锁住的专有格式，DCC / CAD / BIM / EDA / 仿真 |
+| 架构 | heartbeat 路由的自适应双管线，live 进程内与 headless 两条路产出一致 | 任何同时有交互模式与无头模式的重型宿主，Houdini / Maya / Blender / Revit / MATLAB |
+| 序列化纪律 | 顾及 token 成本的导出，与 archetype 求差、超量采样截断、grep 加区间读的读取契约 | 任何 LLM 数据管线的上下文工程 |
 
 ## 版本
 
-当前版本：**v1.5.0**
+当前版本: **2.0.0**
 
-版本号定义在 `src/Source/UAssetJsonExporter/Public/UAssetJsonExporterVersion.h`，同时嵌入在每个导出 JSON 的 `ExporterVersion` 字段中。
+定义在 `src/Source/UAssetWorkbench/Public/UAssetWorkbenchVersion.h`，同时嵌进每份导出 JSON 的 `ExporterVersion` 字段。
 
 ## License
 

@@ -1,0 +1,252 @@
+#include "Import/WidgetLayoutImportCommandlet.h"
+#include "UAssetWorkbenchModule.h"
+#include "UAssetWorkbenchUtil.h"
+#include "UAssetWorkbenchVersion.h"
+
+#include "Blueprint/WidgetTree.h"
+#include "Components/PanelSlot.h"
+#include "Components/PanelWidget.h"
+#include "Components/Widget.h"
+#include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
+#include "Misc/FileHelper.h"
+#include "Misc/PackageName.h"
+#include "Misc/Parse.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
+#include "UObject/SavePackage.h"
+#include "WidgetBlueprint.h"
+
+namespace
+{
+    // Export writes these for readability. Slots is a live object list rebuilt by AddChild, SlotClass
+    // is export-only metadata, feeding either back through ImportText corrupts the tree.
+    bool IsExportOnlyField(const FString& FieldName)
+    {
+        return FieldName == TEXT("Slots") || FieldName == TEXT("SlotClass");
+    }
+}
+
+UWidgetLayoutImportCommandlet::UWidgetLayoutImportCommandlet()
+{
+    IsClient = false;
+    IsEditor = true;
+    IsServer = false;
+    LogToConsole = true;
+}
+
+int32 UWidgetLayoutImportCommandlet::Main(const FString& Params)
+{
+    if (UAssetWorkbench::AbortIfLiveEditor())
+    {
+        return ToExitCode(EUAssetWorkbenchExitType::EditorConflict);
+    }
+
+    UE_LOG(LogUAssetWorkbenchImporter, Display, TEXT("UAssetWorkbench v%s - WidgetLayoutImport"), UASSET_WORKBENCH_VERSION_STRING);
+
+    FString SpecPath;
+    if (!FParse::Value(*Params, TEXT("spec="), SpecPath))
+    {
+        UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("No spec specified. Usage: -spec=\"C:/path/spec.json\""));
+        return ToExitCode(EUAssetWorkbenchExitType::Failed);
+    }
+
+    SpecPath = SpecPath.TrimQuotes();
+
+    FString SpecText;
+    if (!FFileHelper::LoadFileToString(SpecText, *SpecPath))
+    {
+        UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("Failed to read spec: %s"), *SpecPath);
+        return ToExitCode(EUAssetWorkbenchExitType::Failed);
+    }
+
+    TSharedPtr<FJsonObject> Spec;
+    TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(SpecText);
+    if (!FJsonSerializer::Deserialize(Reader, Spec) || !Spec.IsValid())
+    {
+        UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("Spec is not valid JSON: %s"), *SpecPath);
+        return ToExitCode(EUAssetWorkbenchExitType::Failed);
+    }
+
+    FString AssetPath;
+    if (!Spec->TryGetStringField(TEXT("AssetPath"), AssetPath))
+    {
+        UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("Spec has no AssetPath field"));
+        return ToExitCode(EUAssetWorkbenchExitType::Failed);
+    }
+
+    const TSharedPtr<FJsonObject>* RootSpec = nullptr;
+    if (!Spec->TryGetObjectField(TEXT("WidgetTree"), RootSpec))
+    {
+        UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("Spec has no WidgetTree field"));
+        return ToExitCode(EUAssetWorkbenchExitType::Failed);
+    }
+
+    UWidgetBlueprint* WidgetBP = LoadObject<UWidgetBlueprint>(nullptr, *AssetPath);
+    if (!WidgetBP || !WidgetBP->WidgetTree)
+    {
+        UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("Failed to load WidgetBlueprint: %s"), *AssetPath);
+        return ToExitCode(EUAssetWorkbenchExitType::Failed);
+    }
+
+    WidgetBP->Modify();
+    WidgetBP->WidgetTree->Modify();
+
+    // Whole-tree replace. The old root goes unreachable and drops out of the package on save.
+    WidgetBP->WidgetTree->RootWidget = nullptr;
+
+    UWidget* Root = BuildWidget(WidgetBP->WidgetTree, *RootSpec);
+    if (!Root)
+    {
+        UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("Failed to build widget tree for %s"), *AssetPath);
+        return ToExitCode(EUAssetWorkbenchExitType::Failed);
+    }
+
+    WidgetBP->WidgetTree->RootWidget = Root;
+
+    FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
+    FKismetEditorUtilities::CompileBlueprint(WidgetBP);
+
+    if (WidgetBP->Status == BS_Error)
+    {
+        UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("%s compiled with errors, most likely a BindWidget name or type mismatch"), *AssetPath);
+        return ToExitCode(EUAssetWorkbenchExitType::Failed);
+    }
+
+    // Already compiled above, saving only.
+    if (!UAssetWorkbench::CompileAndSavePackage(WidgetBP, /* bCompileBlueprint */ false))
+    {
+        UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("Failed to save package for %s"), *AssetPath);
+        return ToExitCode(EUAssetWorkbenchExitType::Failed);
+    }
+
+    UE_LOG(LogUAssetWorkbenchImporter, Display, TEXT("Imported layout into %s"), *AssetPath);
+    return ToExitCode(EUAssetWorkbenchExitType::Success);
+}
+
+UWidget* UWidgetLayoutImportCommandlet::BuildWidget(UWidgetTree* WidgetTree, const TSharedPtr<FJsonObject>& Spec) const
+{
+    FString ClassName;
+    if (!Spec->TryGetStringField(TEXT("Class"), ClassName))
+    {
+        UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("Widget spec node has no Class field"));
+        return nullptr;
+    }
+
+    UClass* WidgetClass = ResolveWidgetClass(ClassName);
+    if (!WidgetClass)
+    {
+        UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("Unresolved widget class: %s"), *ClassName);
+        return nullptr;
+    }
+
+    FString WidgetName;
+    Spec->TryGetStringField(TEXT("Name"), WidgetName);
+
+    // Empty name would collide across siblings, let the tree generate one instead.
+    const FName ConstructName = WidgetName.IsEmpty() ? NAME_None : FName(*WidgetName);
+
+    UWidget* Widget = WidgetTree->ConstructWidget<UWidget>(WidgetClass, ConstructName);
+    if (!Widget)
+    {
+        UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("Failed to construct widget %s of class %s"), *WidgetName, *ClassName);
+        return nullptr;
+    }
+
+    const TSharedPtr<FJsonObject>* Properties = nullptr;
+    if (Spec->TryGetObjectField(TEXT("Properties"), Properties))
+    {
+        ApplyProperties(Widget, *Properties);
+    }
+
+    const TArray<TSharedPtr<FJsonValue>>* Children = nullptr;
+    if (!Spec->TryGetArrayField(TEXT("Children"), Children))
+    {
+        return Widget;
+    }
+
+    UPanelWidget* Panel = Cast<UPanelWidget>(Widget);
+    if (!Panel)
+    {
+        UE_LOG(LogUAssetWorkbenchImporter, Warning, TEXT("%s has children but is not a panel, children dropped"), *WidgetName);
+        return Widget;
+    }
+
+    for (const TSharedPtr<FJsonValue>& ChildValue : *Children)
+    {
+        const TSharedPtr<FJsonObject>* ChildSpec = nullptr;
+        if (!ChildValue->TryGetObject(ChildSpec))
+        {
+            continue;
+        }
+
+        UWidget* Child = BuildWidget(WidgetTree, *ChildSpec);
+        if (!Child)
+        {
+            continue;
+        }
+
+        UPanelSlot* Slot = Panel->AddChild(Child);
+        if (!Slot)
+        {
+            UE_LOG(LogUAssetWorkbenchImporter, Warning, TEXT("%s rejected child %s"), *WidgetName, *Child->GetName());
+            continue;
+        }
+
+        const TSharedPtr<FJsonObject>* SlotSpec = nullptr;
+        if ((*ChildSpec)->TryGetObjectField(TEXT("Slot"), SlotSpec))
+        {
+            ApplyProperties(Slot, *SlotSpec);
+        }
+    }
+
+    return Widget;
+}
+
+void UWidgetLayoutImportCommandlet::ApplyProperties(UObject* Target, const TSharedPtr<FJsonObject>& Properties) const
+{
+    for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Properties->Values)
+    {
+        if (IsExportOnlyField(Pair.Key))
+        {
+            continue;
+        }
+
+        FProperty* Property = Target->GetClass()->FindPropertyByName(FName(*Pair.Key));
+        if (!Property)
+        {
+            UE_LOG(LogUAssetWorkbenchImporter, Warning, TEXT("No property %s on %s"), *Pair.Key, *Target->GetClass()->GetName());
+            continue;
+        }
+
+        FString Value;
+        if (!Pair.Value->TryGetString(Value))
+        {
+            continue;
+        }
+
+        void* Address = Property->ContainerPtrToValuePtr<void>(Target);
+        if (!Property->ImportText_Direct(*Value, Address, Target, PPF_None))
+        {
+            UE_LOG(LogUAssetWorkbenchImporter, Warning, TEXT("Import failed for %s.%s = %s"), *Target->GetName(), *Pair.Key, *Value);
+        }
+    }
+}
+
+UClass* UWidgetLayoutImportCommandlet::ResolveWidgetClass(const FString& ClassName) const
+{
+    if (ClassName.Contains(TEXT("/")))
+    {
+        return LoadObject<UClass>(nullptr, *ClassName);
+    }
+
+    UClass* UMGClass = UClass::TryFindTypeSlow<UClass>(FString::Printf(TEXT("/Script/UMG.%s"), *ClassName));
+    if (UMGClass)
+    {
+        return UMGClass;
+    }
+
+    return UClass::TryFindTypeSlow<UClass>(ClassName);
+}
