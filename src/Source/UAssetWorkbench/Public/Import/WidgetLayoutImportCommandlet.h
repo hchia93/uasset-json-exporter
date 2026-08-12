@@ -39,4 +39,8 @@ private:
     UWidget* BuildWidget(UWidgetTree* WidgetTree, const TSharedPtr<FJsonObject>& Spec) const;
     void ApplyProperties(UObject* Target, const TSharedPtr<FJsonObject>& Properties) const;
     UClass* ResolveWidgetClass(const FString& ClassName) const;
+
+    // The blueprint keeps widget and animation GUIDs in a map beside the tree. Replacing the tree
+    // without reconciling it trips the compiler on both sides, stale entries and missing ones.
+    void SyncWidgetGuids(class UWidgetBlueprint* WidgetBP) const;
 };

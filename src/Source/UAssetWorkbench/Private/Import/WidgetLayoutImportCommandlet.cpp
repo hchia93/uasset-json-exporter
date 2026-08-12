@@ -3,6 +3,7 @@
 #include "UAssetWorkbenchUtil.h"
 #include "UAssetWorkbenchVersion.h"
 
+#include "Animation/WidgetAnimation.h"
 #include "Blueprint/WidgetTree.h"
 #include "Components/PanelSlot.h"
 #include "Components/PanelWidget.h"
@@ -22,10 +23,16 @@
 namespace
 {
     // Export writes these for readability. Slots is a live object list rebuilt by AddChild, SlotClass
-    // is export-only metadata, feeding either back through ImportText corrupts the tree.
-    bool IsExportOnlyField(const FString& FieldName)
+    // is export-only metadata, feeding either back through ImportText corrupts the tree. Delegate
+    // bindings export as an unparseable placeholder and carry nothing worth restoring.
+    bool IsExportOnlyField(const FString& FieldName, const FString& Value)
     {
-        return FieldName == TEXT("Slots") || FieldName == TEXT("SlotClass");
+        if (FieldName == TEXT("Slots") || FieldName == TEXT("SlotClass"))
+        {
+            return true;
+        }
+
+        return FieldName.EndsWith(TEXT("Delegate")) || Value == TEXT("(null).None");
     }
 }
 
@@ -105,6 +112,8 @@ int32 UWidgetLayoutImportCommandlet::Main(const FString& Params)
     }
 
     WidgetBP->WidgetTree->RootWidget = Root;
+
+    SyncWidgetGuids(WidgetBP);
 
     FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
     FKismetEditorUtilities::CompileBlueprint(WidgetBP);
@@ -209,7 +218,13 @@ void UWidgetLayoutImportCommandlet::ApplyProperties(UObject* Target, const TShar
 {
     for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Properties->Values)
     {
-        if (IsExportOnlyField(Pair.Key))
+        FString Value;
+        if (!Pair.Value->TryGetString(Value))
+        {
+            continue;
+        }
+
+        if (IsExportOnlyField(Pair.Key, Value))
         {
             continue;
         }
@@ -221,18 +236,50 @@ void UWidgetLayoutImportCommandlet::ApplyProperties(UObject* Target, const TShar
             continue;
         }
 
-        FString Value;
-        if (!Pair.Value->TryGetString(Value))
-        {
-            continue;
-        }
-
         void* Address = Property->ContainerPtrToValuePtr<void>(Target);
         if (!Property->ImportText_Direct(*Value, Address, Target, PPF_None))
         {
             UE_LOG(LogUAssetWorkbenchImporter, Warning, TEXT("Import failed for %s.%s = %s"), *Target->GetName(), *Pair.Key, *Value);
         }
     }
+}
+
+void UWidgetLayoutImportCommandlet::SyncWidgetGuids(UWidgetBlueprint* WidgetBP) const
+{
+    TSet<FName> LiveNames;
+    WidgetBP->WidgetTree->ForEachWidget([&LiveNames](UWidget* Widget)
+    {
+        if (Widget)
+        {
+            LiveNames.Add(Widget->GetFName());
+        }
+    });
+
+    // Animations share this map, dropping their entries would break references to them.
+    for (const UWidgetAnimation* Animation : WidgetBP->Animations)
+    {
+        if (Animation)
+        {
+            LiveNames.Add(Animation->GetFName());
+        }
+    }
+
+    for (auto It = WidgetBP->WidgetVariableNameToGuidMap.CreateIterator(); It; ++It)
+    {
+        if (!LiveNames.Contains(It.Key()))
+        {
+            It.RemoveCurrent();
+        }
+    }
+
+    // Same name keeps its old GUID, so external references survive a tree rebuild.
+    WidgetBP->WidgetTree->ForEachWidget([WidgetBP](UWidget* Widget)
+    {
+        if (Widget && !WidgetBP->WidgetVariableNameToGuidMap.Contains(Widget->GetFName()))
+        {
+            WidgetBP->WidgetVariableNameToGuidMap.Add(Widget->GetFName(), FGuid::NewGuid());
+        }
+    });
 }
 
 UClass* UWidgetLayoutImportCommandlet::ResolveWidgetClass(const FString& ClassName) const
