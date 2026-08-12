@@ -101,6 +101,18 @@ int32 UWidgetLayoutImportCommandlet::Main(const FString& Params)
     WidgetBP->Modify();
     WidgetBP->WidgetTree->Modify();
 
+    // Old widgets keep the tree as their outer even once the root is dropped, so constructing a
+    // same-named replacement collides with them. Move them out before rebuilding.
+    TArray<UWidget*> RetiredWidgets;
+    WidgetBP->WidgetTree->GetAllWidgets(RetiredWidgets);
+    for (UWidget* Retired : RetiredWidgets)
+    {
+        if (Retired)
+        {
+            Retired->Rename(nullptr, GetTransientPackage(), REN_DontCreateRedirectors);
+        }
+    }
+
     // Whole-tree replace. The old root goes unreachable and drops out of the package on save.
     WidgetBP->WidgetTree->RootWidget = nullptr;
 
@@ -122,6 +134,29 @@ int32 UWidgetLayoutImportCommandlet::Main(const FString& Params)
     {
         UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("%s compiled with errors, most likely a BindWidget name or type mismatch"), *AssetPath);
         return ToExitCode(EUAssetWorkbenchExitType::Failed);
+    }
+
+    // EditDefaultsOnly properties live on the CDO, not in the tree. Compile rebuilt it, so this has to
+    // come after.
+    const TSharedPtr<FJsonObject>* ClassDefaults = nullptr;
+    if (Spec->TryGetObjectField(TEXT("ClassDefaults"), ClassDefaults))
+    {
+        UObject* DefaultWidget = WidgetBP->GeneratedClass ? WidgetBP->GeneratedClass->GetDefaultObject() : nullptr;
+        if (!DefaultWidget)
+        {
+            UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("%s has no generated class, cannot apply ClassDefaults"), *AssetPath);
+            return ToExitCode(EUAssetWorkbenchExitType::Failed);
+        }
+
+        DefaultWidget->Modify();
+
+        int32 DefaultFailures = 0;
+        UAssetWorkbench::ApplyProperties(DefaultWidget, *ClassDefaults, DefaultFailures);
+        if (DefaultFailures > 0)
+        {
+            UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("%d class default(s) failed on %s"), DefaultFailures, *AssetPath);
+            return ToExitCode(EUAssetWorkbenchExitType::Failed);
+        }
     }
 
     // Already compiled above, saving only.

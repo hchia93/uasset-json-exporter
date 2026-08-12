@@ -47,8 +47,8 @@ namespace UAssetWorkbench
         Audit
     };
 
-    // Suffix decides Export / Import, Audit prefix decides Audit. Repair runs carry no marker,
-    // so Migrate is the fallback.
+    // Import and Export read as noun suffixes, every other verb leads. Create lands in Import because
+    // both write assets. Repair runs carry no marker, so Migrate is the fallback.
     EGroup ResolveGroup(const FString& RunName);
 
     // Returns true if a recent heartbeat is present (in-editor queue subsystem active).

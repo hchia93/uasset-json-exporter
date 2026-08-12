@@ -10,6 +10,7 @@
 #include "Engine/Blueprint.h"
 #include "Engine/World.h"
 #include "HAL/FileManager.h"
+#include "JsonObjectConverter.h"
 #include "Misc/DateTime.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/FileHelper.h"
@@ -115,6 +116,50 @@ TArray<FString> UAssetWorkbench::ParsePathList(const FString& Params, const TCHA
 TArray<FString> UAssetWorkbench::ParseAssetPaths(const FString& Params)
 {
     return ParsePathList(Params, TEXT("-assets="));
+}
+
+int32 UAssetWorkbench::ApplyProperties(UObject* Target, const TSharedPtr<FJsonObject>& Properties, int32& OutFailures)
+{
+    int32 Written = 0;
+
+    for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Properties->Values)
+    {
+        FProperty* Property = Target->GetClass()->FindPropertyByName(FName(*Pair.Key));
+        if (!Property)
+        {
+            UE_LOG(LogUAssetWorkbenchCore, Error, TEXT("No property %s on %s"), *Pair.Key, *Target->GetClass()->GetName());
+            ++OutFailures;
+            continue;
+        }
+
+        void* Address = Property->ContainerPtrToValuePtr<void>(Target);
+
+        // A string is the exporter's own format, the json converter cannot read those struct literals.
+        FString StringValue;
+        if (Pair.Value->TryGetString(StringValue))
+        {
+            if (Property->ImportText_Direct(*StringValue, Address, Target, PPF_None))
+            {
+                ++Written;
+                continue;
+            }
+
+            UE_LOG(LogUAssetWorkbenchCore, Error, TEXT("ImportText failed for %s = %s"), *Pair.Key, *StringValue);
+            ++OutFailures;
+            continue;
+        }
+
+        if (FJsonObjectConverter::JsonValueToUProperty(Pair.Value, Property, Address))
+        {
+            ++Written;
+            continue;
+        }
+
+        UE_LOG(LogUAssetWorkbenchCore, Error, TEXT("Json conversion failed for %s"), *Pair.Key);
+        ++OutFailures;
+    }
+
+    return Written;
 }
 
 bool UAssetWorkbench::CompileAndSavePackage(UObject* Asset, bool bCompileBlueprint)

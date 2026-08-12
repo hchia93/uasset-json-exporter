@@ -16,6 +16,11 @@ namespace UAssetWorkbench
     // Compile Blueprints, mark dirty, write the package to disk. Extension follows level vs asset.
     bool CompileAndSavePackage(UObject* Asset, bool bCompileBlueprint = true);
 
+    // Write JSON values onto an object by property name. A string goes through ImportText, which is the
+    // exporter's own format, anything else goes through the json converter. Returns properties written,
+    // OutFailures counts the ones that resolved but would not take.
+    int32 ApplyProperties(UObject* Target, const TSharedPtr<FJsonObject>& Properties, int32& OutFailures);
+
     // Map a /Game/... asset path to <ProjectDir>/Intermediate/UAssetExport/Game/.../<asset>.json
     FString GetExportPath(const FString& AssetPath);
 

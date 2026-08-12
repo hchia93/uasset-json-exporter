@@ -53,7 +53,7 @@ UAssetWorkbench::EGroup UAssetWorkbench::ResolveGroup(const FString& RunName)
         return EGroup::Export;
     }
 
-    if (RunName.EndsWith(TEXT("Import")))
+    if (RunName.EndsWith(TEXT("Import")) || RunName.StartsWith(TEXT("Create")))
     {
         return EGroup::Import;
     }

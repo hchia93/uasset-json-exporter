@@ -23,7 +23,7 @@
 #
 # Run groups (same rule as the C++ side):
 #   *Export  produce JSON under Intermediate/UAssetExport, completion = every output present and settled
-#   *Import  write back into the asset, completion = process exit code
+#   *Import  write back into the asset, Create* also lands here, completion = process exit code
 #   Audit*   read-only reports, completion = process exit code
 #   others   migration / repair runs, completion = process exit code
 #
@@ -53,6 +53,7 @@ EXTRA_ARGS="${7:-}"
 case "$RUN" in
     *Export) GROUP="export" ;;
     *Import) GROUP="import" ;;
+    Create*) GROUP="import" ;;
     Audit*)  GROUP="audit" ;;
     *)       GROUP="migrate" ;;
 esac
