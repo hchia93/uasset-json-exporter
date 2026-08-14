@@ -20,8 +20,12 @@
 | 看 Niagara 的 emitter、script、renderer | `NiagaraSystemExport` | Export |
 | 看贴图的压缩、sRGB、LOD group、源尺寸 | `TextureExport` | Export |
 | 用代码搭 Widget 布局，或按 spec 重建控件树 | `WidgetLayoutImport` | Import |
+| 设 widget 上 `EditDefaultsOnly` 的属性，那些不在控件树里 | `WidgetLayoutImport` 的 `ClassDefaults` | Import |
+| 批量填 DataAsset 的属性 | `DataAssetImport` | Import |
+| 从零建一批资产，并让它们互相接线 | `CreateAsset` | Import |
 | C++ 改名后 BP 事件不再触发 | `RedirectBlueprintEvent` | Migrate |
 | delegate 参数改名后绑定处留下悬空连线 | `RedirectBlueprintPin` | Migrate |
+| 图逻辑搬进 C++ 后，BP 图里作废的那几个节点要删掉 | `DeleteBlueprintNode` | Migrate |
 | 批量改 Blueprint 的父类 | `ReparentBlueprint` | Migrate |
 | 让 CoreRedirect 解析过的引用落盘，好撤掉那条 redirect | `ResaveAsset` | Migrate |
 | 资产改名后，把别的 level 的 import 改指到新资产 | `SanitizeLevelReference` | Migrate |
@@ -47,7 +51,7 @@ bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
     "/Game/Blueprints/BP_Foo,/Game/Blueprints/BP_Baz"
 ```
 
-Import。目标资产路径放 `AssetList`，spec 走 `EXTRA_ARGS`。
+Import。三个 commandlet 都用 `-spec=` 指向 spec 绝对路径，走 `EXTRA_ARGS`，目标资产路径放 `AssetList` 用于通知显示。
 
 ```bash
 bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
@@ -59,7 +63,21 @@ bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
     '-spec="C:/temp/WBP_Bar.spec.json"'
 ```
 
-Migrate。两个 redirect 默认 dry run，确认输出无误后补 `-apply`。
+`DataAssetImport` 同形，换 RunName 与资产路径即可。
+
+`CreateAsset` 两处不同: 目标资产还不存在，`AssetList` 传空串，且 `-unattended` 必填。
+
+```bash
+bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
+    "<UE_PATH>" \
+    "<PROJECT_DIR>/MyProject.uproject" \
+    CreateAsset \
+    "" \
+    10 600 \
+    '-spec="C:/temp/create.spec.json" -unattended'
+```
+
+Migrate。两个 redirect 与 `DeleteBlueprintNode` 默认 dry run，确认输出无误后补 `-apply`。
 
 ```bash
 bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
@@ -69,6 +87,18 @@ bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
     "/Game/Blueprints/BP_Foo" \
     10 600 \
     '-OwnerClass="/Script/MyModule.MyActor" -OldEvent="OldName" -NewEvent="NewName"'
+```
+
+`DeleteBlueprintNode`。资产路径只放 `AssetList`，node id 从 `BlueprintEdGraphExport` 加 `-graphs` 的导出产物里的 `NodeId` 原样抄，纯十六进制加逗号，不需要引号。
+
+```bash
+bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
+    "<UE_PATH>" \
+    "<PROJECT_DIR>/MyProject.uproject" \
+    DeleteBlueprintNode \
+    "/Game/Blueprints/BP_Foo" \
+    10 600 \
+    '-nodes=A1B2C3D4E5F64A7B8C9D0E1F2A3B4C5D,0F1E2D3C4B5A69788796A5B4C3D2E1F0'
 ```
 
 Audit。不吃 `AssetList`，位置参数留空串。
@@ -98,6 +128,7 @@ Import 与 Migrate。
 
 判定依据: wrapper 退出码
 细节: 编辑器开着看 Message Log 的 `UAsset Workbench` listing，编辑器关着看 `Saved/Logs/` 与 `Saved/UAssetExportQueue/last_commandlet.log`
+例外: `WidgetLayoutImport` 的退出码会被引擎改写，以日志里的 `Imported layout into ...` 为准
 
 Audit。
 
@@ -109,9 +140,16 @@ Audit。
 | 坑 | 处理 |
 | --- | --- |
 | 编辑器开着时直接起 commandlet | 一律走 wrapper。commandlet 检测到活的 heartbeat 会退出码 2 自保 |
+| 在 `EXTRA_ARGS` 里再写一遍 `-assets=` | 重复。wrapper 从位置参数 `AssetList` 生成 `-assets`，queue 路径则从任务 json 的 `Assets` 数组构造 |
 | 导出的 JSON 可能上万行 | 先 grep 定位再按行号区间读，不要整份读进上下文 |
-| `RedirectBlueprintEvent` 与 `RedirectBlueprintPin` 默认不写盘 | 先读 dry run 输出，确认命中的资产与节点，再加 `-apply` |
+| `RedirectBlueprintEvent`、`RedirectBlueprintPin`、`DeleteBlueprintNode` 默认不写盘 | 先读 dry run 输出，确认命中的资产与节点，再加 `-apply` |
+| `DeleteBlueprintNode` 的 node id 靠手写或从图上认 | id 只能从 `BlueprintEdGraphExport` 加 `-graphs` 的导出里原样抄。没命中的 id 会在结尾统一报出来，别当成删干净了 |
+| 以为删了节点，只被它引用的变量也跟着没了 | 删节点只切连线，不重新接线也不动变量。失去引用的 Blueprint 变量另外处理，schema 拒删的 function entry / result 会被跳过并报警 |
 | `WidgetLayoutImport` 是整树替换 | spec 必须描述完整的树，不是增量补丁 |
+| `WidgetLayoutImport` 退出码 1 但资产其实写进去了 | 引擎会改写 commandlet 的退出码。判断成败以日志里的 `Imported layout into ...` 为准，别只看退出码 |
+| `CreateAsset` 漏了 `-unattended` | 引擎的 `FMessageDialog` 不检查 commandlet 模式，某些创建路径会弹窗把进程挂住。这个参数必填 |
+| `CreateAsset` 建 Texture2D 拿到空结果 | 静默失败，先查 `FactoryProperties` 有没有给 `Width` / `Height`，且必须是 2 的幂 |
+| 想改材质的节点图，或增删 DataTable 的行 | 走 Python 更合适。`unreal.MaterialEditingLibrary` 与 `unreal.DataTableFunctionLibrary` 都有完整的脚本接口，后者的 `export_data_table_to_json_string` / `fill_data_table_from_json_string` 是一对 round-trip，commandlet 那边反而绕 |
 | 导出产物不入版本控制 | `Intermediate/UAssetExport` 是临时目录，需要留证据就自行拷走 |
 | 把 Audit 的退出码 3 当成失败 | 3 不是失败，运行本身成功，只是报告里有要处理的东西。跑不起来才是 1 |
 | `AuditLevelReference` 报出一大堆破损 | 先确认项目的插件全部启用。未挂载 content root 下的依赖会被判成 missing，那是假破损 |

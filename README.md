@@ -24,11 +24,11 @@ Four problems, four capability groups.
 | Group | What it does | Output | Count |
 | --- | --- | --- | --- |
 | Export | Read uasset structure, write JSON | JSON under `Intermediate/UAssetExport` | 11 |
-| Import | Read a JSON spec, write back to the uasset | modified uassets | 1 |
+| Import | Read a JSON spec, write back to or create uassets | modified or new uassets | 3 |
 | Migrate | Fix references after a C++ or asset rename | modified uassets | 5 |
 | Audit | Read-only checks producing a report | report JSON | 2 |
 
-The group is decided by the run name: suffix `Export` is the Export group, suffix `Import` is the Import group, prefix `Audit` is the Audit group, everything else is Migrate.
+The group is decided by the run name: suffix `Export` is the Export group, suffix `Import` and prefix `Create` are the Import group, prefix `Audit` is the Audit group, everything else is Migrate. Naming-wise `Import` and `Export` are nouns used as suffixes, every other verb leads.
 
 ## Routing and architecture
 
@@ -380,15 +380,24 @@ ISM / HISM / Foliage components with more than 200 instances export only the cou
 </details>
 
 <details>
-<summary><b>Import</b>, 1 commandlet</summary>
+<summary><b>Import</b>, 3 commandlets</summary>
 
-`WidgetLayoutImport`, reads a JSON spec and writes the widget tree back into a Widget Blueprint, spec path goes through `-spec=`.
+| RunName | What it does |
+| --- | --- |
+| `WidgetLayoutImport` | Rebuilds a Widget Blueprint's widget tree from a spec |
+| `DataAssetImport` | Writes JSON into a DataAsset's properties |
+| `CreateAsset` | Creates assets of any type from a spec |
 
-Two top-level spec fields.
+All three take `-spec=` pointing at the spec's absolute path. `CreateAsset` additionally requires `-unattended`, because `FMessageDialog` does not check for commandlet mode and some creation paths would raise a blocking dialog.
+
+**WidgetLayoutImport**
+
+Top-level spec fields.
 
 | Field | Meaning |
 | --- | --- |
 | `AssetPath` | Asset path of the target Widget Blueprint |
+| `ClassDefaults` | Optional, lands on the generated class CDO |
 | `WidgetTree` | Root node, recursive from there |
 
 Node fields.
@@ -404,6 +413,8 @@ Node fields.
 Property value strings take the same form Export emits, e.g. `(Value=1.000000,SizeRule=Fill)`, `(Right=48.000000)`, `HAlign_Fill`.
 
 The behavior is whole-tree replacement, not incremental merge, so the spec must describe the complete tree. A `WidgetLayoutExport` output feeds straight back in as Import input, and the usual way to change a layout is Export the current tree, edit the JSON, Import it back.
+
+`ClassDefaults` lands on the generated class CDO, which is where `EditDefaultsOnly` properties live rather than in the widget tree. It is applied after the compile, because the compile rebuilds the CDO.
 
 ```json
 {
@@ -448,6 +459,58 @@ The behavior is whole-tree replacement, not incremental merge, so the spec must 
   }
 }
 ```
+
+**DataAssetImport**
+
+The inverse of `DataAssetExport`. Property values take either of two forms.
+
+| Form | Goes through | Used for |
+| --- | --- | --- |
+| String | reflection `ImportText` | the struct literal form `DataAssetExport` emits, so an exported asset round-trips back in |
+| Object or array | the json converter | nested structs and arrays in a hand-written spec, far more readable |
+
+Only the named properties are written, everything else on the asset keeps its current value. If any single property fails to write, the whole save is abandoned, so no half-written asset is left behind.
+
+```json
+{
+  "AssetPath": "/Game/Path/DA_Foo",
+  "Properties": {
+    "Scalar": "12.0",
+    "Nested": [ { "Name": "A" }, { "Name": "B" } ]
+  }
+}
+```
+
+**CreateAsset**
+
+The `Assets` array is created in order.
+
+```json
+{
+  "Assets": [
+    {
+      "PackagePath": "/Game/Path",
+      "AssetName": "DT_Foo",
+      "Class": "/Script/Engine.DataTable",
+      "FactoryProperties": { "Struct": "/Script/MyModule.MyRow" },
+      "Properties": {}
+    }
+  ]
+}
+```
+
+The two property blocks are separate because some types are only valid if their factory was configured first, otherwise creation fails or silently yields nothing. `FactoryProperties` is applied to the factory before creation, `Properties` is applied to the asset after creation and follows the same two forms as `DataAssetImport`.
+
+| Asset type | Required in FactoryProperties | Consequence of omitting |
+| --- | --- | --- |
+| DataTable | `Struct`, the field name is `Struct`, not `RowStruct` | yields nothing |
+| Blueprint | `ParentClass` plus `bSkipClassPicker` | blocking dialog |
+| Texture2D | `Width` / `Height`, both must be powers of two | silently yields nothing |
+| MaterialInstanceConstant | `InitialParent`, optional | an empty instance with no parent |
+
+`Class` is best written as a full path such as `/Script/MediaAssets.MediaPlayer`, a short name resolves through a fuzzy engine lookup and warns, and a Blueprint generated class, which needs its package loaded, requires the full path. A later entry can reference in its `Properties` an asset path an earlier entry just created, so one spec wires up a group of mutually referencing assets. An asset already existing at the same path is skipped and reported, this never overwrites.
+
+Material node graphs are out of reach. `CreateAsset` produces an empty material, but adding expressions such as `TextureSample` and wiring them up goes more directly through Python's `unreal.MaterialEditingLibrary`.
 
 </details>
 

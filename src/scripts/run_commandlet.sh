@@ -71,6 +71,15 @@ if [ ! -f "$UPROJECT" ]; then
     exit 2
 fi
 
+# Values go inside a json string literal. An unescaped quote or backslash writes a broken
+# task file, which the subsystem rejects with "Failed to parse pending task json".
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '%s' "$s"
+}
+
 get_mtime() {
     stat -c %Y "$1" 2>/dev/null || echo 0
 }
@@ -139,14 +148,14 @@ route_queue() {
         if [ -n "$assets_json" ]; then
             assets_json="$assets_json,"
         fi
-        assets_json="$assets_json\"$A\""
+        assets_json="$assets_json\"$(json_escape "$A")\""
     done
 
     cat > "$pending_tmp" <<EOF
 {
-  "RunName": "$RUN",
+  "RunName": "$(json_escape "$RUN")",
   "Assets": [$assets_json],
-  "ExtraArgs": "$EXTRA_ARGS"
+  "ExtraArgs": "$(json_escape "$EXTRA_ARGS")"
 }
 EOF
     mv "$pending_tmp" "$pending_path"

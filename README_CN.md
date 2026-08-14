@@ -24,11 +24,11 @@
 | 组 | 做什么 | 产出 | 数量 |
 | --- | --- | --- | --- |
 | Export | 读 uasset 结构导出 JSON | `Intermediate/UAssetExport` 下的 JSON | 11 |
-| Import | 读 JSON spec 写回 uasset | 被修改的 uasset | 1 |
+| Import | 读 JSON spec 写回或创建 uasset | 被修改或新建的 uasset | 3 |
 | Migrate | C++ 或资产改名后修复引用 | 被修改的 uasset | 5 |
 | Audit | 只读检查产出报告 | 报告 JSON | 2 |
 
-组别由 run 名决定: 后缀 `Export` 是 Export 组，后缀 `Import` 是 Import 组，前缀 `Audit` 是 Audit 组，其余是 Migrate 组。
+组别由 run 名决定: 后缀 `Export` 是 Export 组，后缀 `Import` 与前缀 `Create` 是 Import 组，前缀 `Audit` 是 Audit 组，其余是 Migrate 组。命名上 `Import` 与 `Export` 是名词做后缀，其余动词在前。
 
 ## 通道与架构
 
@@ -380,15 +380,24 @@ ISM / HISM / Foliage 组件的实例数超过 200 时只导出数量、包围盒
 </details>
 
 <details>
-<summary><b>Import</b>，1 个 commandlet</summary>
+<summary><b>Import</b>，3 个 commandlet</summary>
 
-`WidgetLayoutImport`，读 JSON spec 把控件树写回 Widget Blueprint，spec 路径走 `-spec=`。
+| RunName | 做什么 |
+| --- | --- |
+| `WidgetLayoutImport` | 从 spec 重建 Widget Blueprint 的控件树 |
+| `DataAssetImport` | 把 JSON 写进 DataAsset 的属性 |
+| `CreateAsset` | 从 spec 创建任意类型的资产 |
 
-spec 顶层两个字段。
+三个都用 `-spec=` 指向 spec 的绝对路径。`CreateAsset` 还必须带 `-unattended`，引擎的 `FMessageDialog` 不检查 commandlet 模式，某些创建路径会弹窗阻塞。
+
+**WidgetLayoutImport**
+
+spec 顶层字段。
 
 | 字段 | 含义 |
 | --- | --- |
 | `AssetPath` | 目标 Widget Blueprint 的资产路径 |
+| `ClassDefaults` | 可选，写 generated class 的 CDO |
 | `WidgetTree` | 根节点，往下递归 |
 
 节点字段。
@@ -404,6 +413,8 @@ spec 顶层两个字段。
 属性值的字符串形态就是 Export 导出的那种，例 `(Value=1.000000,SizeRule=Fill)`、`(Right=48.000000)`、`HAlign_Fill`。
 
 行为是整树替换，不是增量合并，spec 必须描述完整的树。`WidgetLayoutExport` 的产物可以直接当 Import 的输入，改布局的常规做法是先 Export 拿到当前树，改 JSON，再 Import 写回。
+
+`ClassDefaults` 落在 generated class 的 CDO 上，`EditDefaultsOnly` 那类属性住在那里，不在控件树里。它在编译之后才应用，因为编译会重建 CDO。
 
 ```json
 {
@@ -448,6 +459,58 @@ spec 顶层两个字段。
   }
 }
 ```
+
+**DataAssetImport**
+
+`DataAssetExport` 的反向操作。属性值两种形态。
+
+| 形态 | 走什么 | 用在哪 |
+| --- | --- | --- |
+| 字符串 | 反射 `ImportText` | `DataAssetExport` 导出的那种结构字面量，导出的资产能 round-trip 回去 |
+| 对象或数组 | json 转换器 | 手写 spec 时的嵌套结构与数组，可读性好得多 |
+
+只有 spec 里点名的属性会被写，资产上其余属性保持原值。任何一个属性写失败就整体放弃保存，不会留下写了一半的资产。
+
+```json
+{
+  "AssetPath": "/Game/Path/DA_Foo",
+  "Properties": {
+    "Scalar": "12.0",
+    "Nested": [ { "Name": "A" }, { "Name": "B" } ]
+  }
+}
+```
+
+**CreateAsset**
+
+`Assets` 数组按顺序创建。
+
+```json
+{
+  "Assets": [
+    {
+      "PackagePath": "/Game/Path",
+      "AssetName": "DT_Foo",
+      "Class": "/Script/Engine.DataTable",
+      "FactoryProperties": { "Struct": "/Script/MyModule.MyRow" },
+      "Properties": {}
+    }
+  ]
+}
+```
+
+两个属性块分开，是因为有些类型必须在创建前配好 factory，否则创建会失败甚至静默返回空。`FactoryProperties` 在创建前配到 factory 上，`Properties` 在创建后套到资产上，规则同 `DataAssetImport` 的两形态。
+
+| 资产类型 | FactoryProperties 必填 | 不填的后果 |
+| --- | --- | --- |
+| DataTable | `Struct`，字段名是 `Struct` 不是 `RowStruct` | 返回空 |
+| Blueprint | `ParentClass` 加 `bSkipClassPicker` | 弹窗阻塞 |
+| Texture2D | `Width` / `Height`，且必须是 2 的幂 | 静默返回空 |
+| MaterialInstanceConstant | `InitialParent`，可选 | 得到无 parent 的空实例 |
+
+`Class` 推荐写完整路径如 `/Script/MediaAssets.MediaPlayer`，短名在引擎里是模糊查找会打警告，Blueprint 生成类这种要加载包的必须写完整路径。后面的条目可以在 `Properties` 里引用前面刚创建出来的资产路径，一条 spec 就能把互相引用的一组资产接好。同名资产已存在时跳过并报告，永不覆盖。
+
+建不了材质的节点图。`CreateAsset` 能建出空材质，但往里加 `TextureSample` 之类的表达式并连线，走 Python 的 `unreal.MaterialEditingLibrary` 更直接。
 
 </details>
 

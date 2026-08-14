@@ -19,6 +19,7 @@ CoreRedirects 只覆盖调用侧: call 节点、变量引用、类引用。Bluep
 | --- | --- | --- |
 | `RedirectBlueprintEvent` | 把退化成 custom event 的 BP override 重新接回新事件，连线一并搬过去。能识别 UE 加的 `_N` 去重后缀 | dry run |
 | `RedirectBlueprintPin` | 把绑定节点的连线从旧输出 pin 移到新 pin，然后重建节点丢掉旧 pin。只处理同时带有新旧两个 pin 的节点 | dry run |
+| `DeleteBlueprintNode` | 按 node id 删图节点，图逻辑搬进 C++ 之后的清理步骤。删除会切断该节点所有连线，不重新接线。schema 拒删的节点，function entry 与 result，报出后跳过 | dry run |
 | `ReparentBlueprint` | 改 Blueprint 的父类 | 直接执行并保存 |
 | `ResaveAsset` | 强制 load、compile、save，让 load 期的 fixup 落盘，例如已被 CoreRedirect 解析的引用。之后就能撤掉那条 redirect。支持 Blueprint 和 map | 直接保存 |
 | `SanitizeLevelReference` | 把 level 里对旧资产的每一处引用换成新资产，然后 resave 这个 level | 直接保存，`-dryrun` 只统计 |
@@ -44,6 +45,17 @@ bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
     RedirectBlueprintPin "/Game/Blueprints/BP_Foo" 10 600 \
     '-OldPin="Amount" -NewPin="DeltaAmount"'
 ```
+
+`DeleteBlueprintNode`。node id 从 `BlueprintEdGraphExport` 加 `-graphs` 的导出产物里的 `NodeId` 原样抄，纯十六进制加逗号，不需要引号。
+
+```bash
+bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
+    "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject" \
+    DeleteBlueprintNode "/Game/Blueprints/BP_Foo" 10 600 \
+    '-nodes=A1B2C3D4E5F64A7B8C9D0E1F2A3B4C5D,0F1E2D3C4B5A69788796A5B4C3D2E1F0'
+```
+
+没命中任何节点的 id 会在结尾统一报出来，打错字不会静默通过。因删除而失去引用的 Blueprint 变量不动，要另外处理。
 
 `ReparentBlueprint`。
 
@@ -109,6 +121,7 @@ bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
 | --- | --- | --- |
 | `RedirectBlueprintEvent` | 只扫描 | 补 `-apply` |
 | `RedirectBlueprintPin` | 只扫描 | 补 `-apply` |
+| `DeleteBlueprintNode` | 只扫描 | 补 `-apply` |
 | `SanitizeLevelReference` | 直接落盘 | 想先看结果就加 `-dryrun` |
 
 两个 redirect 的扫描输出里逐条列出命中的 Blueprint、事件或节点、以及会搬多少组连线，确认无误再补 `-apply` 编译并保存。
