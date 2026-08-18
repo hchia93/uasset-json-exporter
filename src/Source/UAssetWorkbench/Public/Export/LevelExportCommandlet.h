@@ -19,6 +19,9 @@
  *   Instanced components (ISM / HISM / Foliage) with > InstanceDumpThreshold
  *   instances only record count + bounds + first few samples.
  *
+ *   Instanced subobjects that are not components (WorldSettings' NavigationSystemConfig,
+ *   etc) are nested under their property name with absolute values, not a delta.
+ *
  * Usage:
  *   UnrealEditor-Cmd.exe Project.uproject -run=LevelExport -assets="/Game/Maps/L_A,/Game/Maps/L_B"
  *
@@ -46,6 +49,7 @@ private:
     TSharedPtr<FJsonObject> ExportComponent(class UActorComponent* Component) const;
     TSharedPtr<FJsonObject> ExportWorldSettings(class AWorldSettings* WorldSettings) const;
     TSharedPtr<FJsonObject> ExportDeltaProperties(UObject* Object, UObject* Archetype) const;
+    TSharedPtr<FJsonObject> ExportInstancedSubobject(UObject* SubObject) const;
 
     void AddInstancedComponentData(class UInstancedStaticMeshComponent* IsmComp, TSharedPtr<FJsonObject>& OutJson) const;
     void AddTransformField(const FTransform& Transform, const FString& FieldName, TSharedPtr<FJsonObject>& OutJson) const;

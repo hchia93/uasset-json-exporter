@@ -3,6 +3,7 @@
 #include "UAssetWorkbenchUtil.h"
 #include "UAssetWorkbenchVersion.h"
 
+#include "Components/ActorComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Components/SceneComponent.h"
@@ -408,7 +409,22 @@ TSharedPtr<FJsonObject> ULevelExportCommandlet::ExportDeltaProperties(UObject* O
         FProperty* Prop = *PropIt;
 
         if (Prop->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated | CPF_EditorOnly)) continue;
-        if (Prop->HasAnyPropertyFlags(CPF_InstancedReference)) continue; // components tracked separately
+        if (Prop->HasAnyPropertyFlags(CPF_InstancedReference))
+        {
+            // Components have their own section. Other instanced subobjects (nav system config, etc)
+            // carry real level data and would vanish entirely under a blanket skip.
+            FObjectProperty* ObjectProp = CastField<FObjectProperty>(Prop);
+            if (!ObjectProp || ObjectProp->PropertyClass->IsChildOf(UActorComponent::StaticClass()))
+            {
+                continue;
+            }
+
+            if (UObject* SubObject = ObjectProp->GetObjectPropertyValue(Prop->ContainerPtrToValuePtr<void>(Object)))
+            {
+                Props->SetObjectField(Prop->GetName(), ExportInstancedSubobject(SubObject));
+            }
+            continue;
+        }
 
         void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Object);
         void* ArchetypePtr = (Archetype->GetClass() == Class || Archetype->IsA(Class))
@@ -428,6 +444,38 @@ TSharedPtr<FJsonObject> ULevelExportCommandlet::ExportDeltaProperties(UObject* O
         }
     }
     return Props;
+}
+
+TSharedPtr<FJsonObject> ULevelExportCommandlet::ExportInstancedSubobject(UObject* SubObject) const
+{
+    TSharedPtr<FJsonObject> Json = MakeShared<FJsonObject>();
+    Json->SetStringField(TEXT("Class"), SubObject->GetClass()->GetPathName());
+
+    // Absolute values, not a delta. These defaults come from project settings, so a delta hides
+    // exactly the case worth checking, a map that merely agrees with the current ini.
+    TSharedPtr<FJsonObject> Props = MakeShared<FJsonObject>();
+    for (TFieldIterator<FProperty> PropIt(SubObject->GetClass()); PropIt; ++PropIt)
+    {
+        FProperty* Prop = *PropIt;
+        if (Prop->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated))
+        {
+            continue;
+        }
+
+        FString Value;
+        Prop->ExportTextItem_Direct(Value, Prop->ContainerPtrToValuePtr<void>(SubObject), nullptr, SubObject, PPF_None);
+        if (!Value.IsEmpty())
+        {
+            Props->SetStringField(Prop->GetName(), Value);
+        }
+    }
+
+    if (Props->Values.Num() > 0)
+    {
+        Json->SetObjectField(TEXT("Properties"), Props);
+    }
+
+    return Json;
 }
 
 void ULevelExportCommandlet::AddTransformField(const FTransform& Transform, const FString& FieldName, TSharedPtr<FJsonObject>& OutJson) const
