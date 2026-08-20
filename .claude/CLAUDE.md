@@ -1,6 +1,6 @@
 # UAsset Workbench
 
-Unreal Engine 5 Editor-only plugin，版本 2.0.0。让脚本与 AI agent 能对 uasset 做非交互操作，四组能力 Export / Import / Migrate / Audit。
+Unreal Engine 5 Editor-only plugin，版本 2.3.0。让脚本与 AI agent 能对 uasset 做非交互操作，五组能力 Export / Import / Edit / Migrate / Audit。
 
 ## 项目结构
 
@@ -9,10 +9,10 @@ src/                                  UE5 插件，复制到 Plugins/ 即可使�
 ├── UAssetWorkbench.uplugin
 ├── scripts/                          wrapper 与辅助脚本
 └── Source/UAssetWorkbench/
-    ├── Public/ 与 Private/           各自按 Export / Migrate / Import / Audit 分四个子目录
+    ├── Public/ 与 Private/           各自按 Export / Import / Edit / Migrate / Audit 分五个子目录
     │                                 共享层（Module / Util / Version / QueueSubsystem）在两者根部
     └── UAssetWorkbench.Build.cs
-Docs/                                 给 AI agent 读的中文文档，五份
+Docs/                                 给 AI agent 读的中文文档，六份
 ```
 
 ## 版本管理
@@ -37,11 +37,12 @@ Docs/                                 给 AI agent 读的中文文档，五份
 | `LogUAssetWorkbenchExporter` | Export 组 |
 | `LogUAssetWorkbenchMigrator` | Migrate 组 |
 | `LogUAssetWorkbenchImporter` | Import 组 |
+| `LogUAssetWorkbenchEditor` | Edit 组 |
 | `LogUAssetWorkbenchAuditor` | Audit 组 |
 
 ## Commandlet 分组规则
 
-run 名后缀 `Export` 进 Export 组，后缀 `Import` 进 Import 组，前缀 `Audit` 进 Audit 组，其余是 Migrate 组。
+run 名后缀 `Export` 进 Export 组，后缀 `Import` 与前缀 `Create` 进 Import 组，前缀 `Edit` 进 Edit 组，前缀 `Audit` 进 Audit 组，其余是 Migrate 组。
 
 这套规则在 C++ 的 `UAssetWorkbench::ResolveGroup` 与 `scripts/run_commandlet.sh` 的 `case` 分支各写了一遍，改一处必须改两处。
 

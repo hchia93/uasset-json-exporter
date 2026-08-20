@@ -21,6 +21,7 @@ CoreRedirects 只覆盖调用侧: call 节点、变量引用、类引用。Bluep
 | `RedirectBlueprintPin` | 把绑定节点的连线从旧输出 pin 移到新 pin，然后重建节点丢掉旧 pin。只处理同时带有新旧两个 pin 的节点 | dry run |
 | `DeleteBlueprintNode` | 按 node id 删图节点，图逻辑搬进 C++ 之后的清理步骤。删除会切断该节点所有连线，不重新接线。schema 拒删的节点，function entry 与 result，报出后跳过 | dry run |
 | `ReparentBlueprint` | 改 Blueprint 的父类 | 直接执行并保存 |
+| `DuplicateAsset` | 把资产复制到新路径。副本独立，内部引用仍指向原来指的东西，不做重定向。目标已存在是错误，重跑不会覆盖掉已经改过的副本 | dry run |
 | `ResaveAsset` | 强制 load、compile、save，让 load 期的 fixup 落盘，例如已被 CoreRedirect 解析的引用。之后就能撤掉那条 redirect。支持 Blueprint 和 map | 直接保存 |
 | `SanitizeLevelReference` | 把 level 里对旧资产的每一处引用换成新资产，然后 resave 这个 level | 直接保存，`-dryrun` 只统计 |
 

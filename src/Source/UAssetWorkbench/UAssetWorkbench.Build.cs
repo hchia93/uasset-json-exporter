@@ -33,7 +33,8 @@ public class UAssetWorkbench : ModuleRules
                 "AnimGraph",
                 "DirectoryWatcher",
                 "Projects",
-                "EditorSubsystem"
+                "EditorSubsystem",
+                "SubobjectDataInterface"
             }
         );
     }

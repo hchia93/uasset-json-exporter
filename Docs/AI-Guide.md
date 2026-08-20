@@ -23,10 +23,15 @@
 | 设 widget 上 `EditDefaultsOnly` 的属性，那些不在控件树里 | `WidgetLayoutImport` 的 `ClassDefaults` | Import |
 | 批量填 DataAsset 的属性 | `DataAssetImport` | Import |
 | 从零建一批资产，并让它们互相接线 | `CreateAsset` | Import |
+| 给既有 BP 加组件、加变量、建节点接线、设默认值 | `EditBlueprint` | Edit |
+| 一次改完同一个 BP 的多个方面，要么全成要么不落盘 | `EditBlueprint` | Edit |
+| 生成完的图要排版，不想手写坐标 | `EditBlueprint` 的 `Layout` `Arrange` | Edit |
+| 连线歪了要拉平，等同编辑器里按 Q | `EditBlueprint` 的 `Layout` `Straighten` | Edit |
 | C++ 改名后 BP 事件不再触发 | `RedirectBlueprintEvent` | Migrate |
 | delegate 参数改名后绑定处留下悬空连线 | `RedirectBlueprintPin` | Migrate |
 | 图逻辑搬进 C++ 后，BP 图里作废的那几个节点要删掉 | `DeleteBlueprintNode` | Migrate |
 | 批量改 Blueprint 的父类 | `ReparentBlueprint` | Migrate |
+| 在动手前先复制一份资产做对照 | `DuplicateAsset` | Migrate |
 | 让 CoreRedirect 解析过的引用落盘，好撤掉那条 redirect | `ResaveAsset` | Migrate |
 | 资产改名后，把别的 level 的 import 改指到新资产 | `SanitizeLevelReference` | Migrate |
 | 想知道有没有 level 引用了已经不存在的资产 | `AuditLevelReference` | Audit |

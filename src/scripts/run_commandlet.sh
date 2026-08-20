@@ -17,15 +17,17 @@
 #   UPROJECT    Absolute path to the .uproject file
 #   RunName     Commandlet name, e.g. "BlueprintEdGraphExport"
 #   AssetList   Comma-separated asset paths, e.g. "/Game/Foo/BP_A,/Game/Bar/BP_B"
+#               Spec-driven runs (Edit*, *Import, Create*) name their targets in the spec, pass ""
 #   IDLE_SEC    Export runs: seconds of output mtime stability before kill. Default 10.
 #   MAX_SEC     Absolute upper bound on total wait. Default 600.
 #   EXTRA_ARGS  Forwarded to the commandlet, e.g. "-graphs" or "-spec=C:/path/spec.json". Default empty.
 #
 # Run groups (same rule as the C++ side):
 #   *Export  produce JSON under Intermediate/UAssetExport, completion = every output present and settled
-#   *Import  write back into the asset, Create* also lands here, completion = process exit code
+#   *Import  regenerate an asset from a spec, Create* also lands here, completion = process exit code
+#   Edit*    change an existing asset to match an intent, completion = process exit code
 #   Audit*   read-only reports, completion = process exit code
-#   others   migration / repair runs, completion = process exit code
+#   others   migration runs (redirect / resave / replace), completion = process exit code
 #
 # Exit codes (passed straight through from the commandlet):
 #   0 - success
@@ -54,6 +56,7 @@ case "$RUN" in
     *Export) GROUP="export" ;;
     *Import) GROUP="import" ;;
     Create*) GROUP="import" ;;
+    Edit*)   GROUP="edit" ;;
     Audit*)  GROUP="audit" ;;
     *)       GROUP="migrate" ;;
 esac

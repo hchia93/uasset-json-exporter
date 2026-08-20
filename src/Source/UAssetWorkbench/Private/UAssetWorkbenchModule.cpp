@@ -14,6 +14,7 @@ DEFINE_LOG_CATEGORY(LogUAssetWorkbenchExporter);
 DEFINE_LOG_CATEGORY(LogUAssetWorkbenchMigrator);
 DEFINE_LOG_CATEGORY(LogUAssetWorkbenchImporter);
 DEFINE_LOG_CATEGORY(LogUAssetWorkbenchAuditor);
+DEFINE_LOG_CATEGORY(LogUAssetWorkbenchEditor);
 
 void FUAssetWorkbenchModule::StartupModule()
 {
@@ -56,6 +57,11 @@ UAssetWorkbench::EGroup UAssetWorkbench::ResolveGroup(const FString& RunName)
     if (RunName.EndsWith(TEXT("Import")) || RunName.StartsWith(TEXT("Create")))
     {
         return EGroup::Import;
+    }
+
+    if (RunName.StartsWith(TEXT("Edit")))
+    {
+        return EGroup::Edit;
     }
 
     if (RunName.StartsWith(TEXT("Audit")))

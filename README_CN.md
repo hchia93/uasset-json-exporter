@@ -14,21 +14,23 @@
 | --- | --- |
 | 读不了 | 逻辑与配置锁在二进制 `.uasset` 里，AI 拿到文件也无从下手。上百节点的 EventGraph 没有可读的文本形态，蓝图里的废弃变量、断掉的连线、错误的默认值靠肉眼在编辑器里审不完。Montage 的 notify 时间点、UMG 的层级与关键帧、Niagara 与材质参数、DataTable 数值、level 的 actor 摆放与 streaming 配置，全都只在编辑器界面里存在 |
 | 改不了 | 要改 UMG 布局只能在编辑器里手工拖，没有可版本控制、可重放的写入路径 |
+| 改不动既有的 | 给蓝图加个组件、在图里接上线、再设个默认值，是三次分开的手工编辑，一批蓝图就要重复一批次 |
 | 改名后修不了 | C++ 或资产改名后，CoreRedirects 只能修调用侧，修不了 Blueprint 图里的实现侧与消费侧，也修不了别的 level 对旧路径的 import |
 | 审计不了 | 破损引用、level 的 streaming 拓扑、每个 level 的组件预算，没有批量查询的入口 |
 
-四类问题对应四组能力。
+五类问题对应五组能力。
 
-## 四组能力
+## 五组能力
 
 | 组 | 做什么 | 产出 | 数量 |
 | --- | --- | --- | --- |
 | Export | 读 uasset 结构导出 JSON | `Intermediate/UAssetExport` 下的 JSON | 11 |
 | Import | 读 JSON spec 写回或创建 uasset | 被修改或新建的 uasset | 3 |
-| Migrate | C++ 或资产改名后修复引用 | 被修改的 uasset | 5 |
+| Edit | 按意图修改既有 uasset | 被修改的 uasset | 1 |
+| Migrate | C++ 或资产改名后修复引用 | 被修改的 uasset | 6 |
 | Audit | 只读检查产出报告 | 报告 JSON | 2 |
 
-组别由 run 名决定: 后缀 `Export` 是 Export 组，后缀 `Import` 与前缀 `Create` 是 Import 组，前缀 `Audit` 是 Audit 组，其余是 Migrate 组。命名上 `Import` 与 `Export` 是名词做后缀，其余动词在前。
+组别由 run 名决定: 后缀 `Export` 是 Export 组，后缀 `Import` 与前缀 `Create` 是 Import 组，前缀 `Edit` 是 Edit 组，前缀 `Audit` 是 Audit 组，其余是 Migrate 组。命名上 `Import` 与 `Export` 是名词做后缀，其余动词在前。
 
 ## 通道与架构
 
@@ -78,6 +80,15 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
     "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject" \
     WidgetLayoutImport "/Game/UI/WBP_Foo" 10 600 \
     '-spec="C:/temp/WBP_Foo.spec.json"'
+```
+
+Edit。
+
+```bash
+MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
+    "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject" \
+    EditBlueprint "" 10 600 \
+    '-spec="C:/temp/BP_Foo.edit.json" -apply'
 ```
 
 Migrate。
@@ -515,7 +526,40 @@ spec 顶层字段。
 </details>
 
 <details>
-<summary><b>Migrate</b>，5 个 commandlet</summary>
+<summary><b>Edit</b>，1 个 commandlet</summary>
+
+Import 是照 spec 重新生成一份资产，Edit 是改动既有的那一份，划分对齐编辑器自己的 Blueprint diff 把资产拆成的几个面。
+
+| Spec key | 对应 diff mode | 写什么 |
+| --- | --- | --- |
+| `Components` | `ComponentsMode` | SimpleConstructionScript 组件树 |
+| `Variables` | `MyBlueprintMode` | 成员变量 |
+| `Defaults` | `DefaultsMode` | CDO 与组件模板的属性值 |
+| `Graph` | `GraphMode` | 节点、pin 默认值、连线 |
+| `Layout` | 无，纯外观 | 节点位置 |
+
+| RunName | 做什么 | 默认行为 |
+| --- | --- | --- |
+| `EditBlueprint` | 把 spec 点名的每个面应用到一个 Blueprint 上 | dry run |
+
+一个 target 只 load 一次资产，跑完 spec 点名的所有 writer，编译保存一次。任一 writer 失败整个 target 在落盘前中止，蓝图不会停在改了一半的状态。
+
+writer 的执行顺序固定，与 spec 里 key 的顺序无关，因为后一个依赖前一个。
+
+```
+Components -> Variables -> Defaults -> Graph -> Layout
+```
+
+`Graph` 能引用同一次运行里前面 writer 新建的组件和变量，`Layout` 能用 `Graph` 给节点的 Id 寻址。这条依赖就是五个面合成一个 commandlet 而不是拆成五个的原因。
+
+节点用 Id 寻址。spec 新建的节点用 spec 给的 Id，已存在的节点用 `BlueprintEdGraphExport -graphs` 打印的 32 位 NodeId，两者同一命名空间，所以新节点能直接接到旧节点上。连线走 `UEdGraphSchema_K2::TryCreateConnection`，与在编辑器里拖线同一条路，会校验并在需要时插入转换节点。
+
+`Layout` 带 `Arrange`，按图的拓扑铺开，spec 里一行坐标都不用写；也带 `Straighten`，就是编辑器里的 Q。headless 下 Slate 没量过任何东西，所以节点尺寸是从标题行数与 pin 行数估出来的，不是从 widget 上读的。
+
+</details>
+
+<details>
+<summary><b>Migrate</b>，6 个 commandlet</summary>
 
 CoreRedirects 只覆盖调用侧，Blueprint 图里的实现侧与消费侧不在它的射程内。改名的 interface event 会让 BP override 退化成孤立的 custom event，事件不再触发；改名的 delegate 参数会在绑定节点上留下悬空 pin。两类都编译得过去，靠人眼在大项目里扫不出来。
 
@@ -526,6 +570,7 @@ CoreRedirects 只覆盖调用侧，Blueprint 图里的实现侧与消费侧不�
 | `ReparentBlueprint` | 改 Blueprint 的父类 | 直接落盘 |
 | `ResaveAsset` | 强制 load、compile、save，让 load 期的 fixup 落盘，之后就能撤掉那条 CoreRedirect，支持 Blueprint 与 map | 直接落盘 |
 | `SanitizeLevelReference` | 把 level 里对旧资产的每一处引用换成新资产，然后 resave 这个 level | 直接落盘，`-dryrun` 只统计 |
+| `DuplicateAsset` | 把资产复制到新路径，副本独立，内部引用不做重定向，目标已存在是错误而不是覆盖 | dry run |
 
 两个 redirect 默认只扫描，逐条列出命中的 Blueprint、事件或节点、以及会搬多少组连线，确认无误再补 `-apply` 编译并保存。扫描一条都没命中时会给 warning，先核对 `-OwnerClass` 与旧名拼写。
 
@@ -617,6 +662,7 @@ workbench 走 commandlet 加引擎稳定 API，绕开正在演进的那一层。
 | `Docs/AI-Guide.md` | 给 AI agent 的调用手册，决策表加调用模板加常见坑 |
 | `Docs/Export.md` | Export 组明细 |
 | `Docs/Import.md` | Import 组明细与 spec 格式 |
+| `Docs/Edit.md` | Edit 组明细，每个 spec key 与每个 layout op |
 | `Docs/Migrate.md` | Migrate 组明细 |
 | `Docs/Audit.md` | Audit 组明细与 stream metric 工作流 |
 
@@ -634,7 +680,7 @@ UE 只是验证场，三样可复用的东西不依赖它。
 
 ## 版本
 
-当前版本: **2.0.0**
+当前版本: **2.3.0**
 
 定义在 `src/Source/UAssetWorkbench/Public/UAssetWorkbenchVersion.h`，同时嵌进每份导出 JSON 的 `ExporterVersion` 字段。
 

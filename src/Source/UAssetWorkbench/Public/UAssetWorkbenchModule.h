@@ -8,6 +8,7 @@ DECLARE_LOG_CATEGORY_EXTERN(LogUAssetWorkbenchExporter, Log, All);
 DECLARE_LOG_CATEGORY_EXTERN(LogUAssetWorkbenchMigrator, Log, All);
 DECLARE_LOG_CATEGORY_EXTERN(LogUAssetWorkbenchImporter, Log, All);
 DECLARE_LOG_CATEGORY_EXTERN(LogUAssetWorkbenchAuditor, Log, All);
+DECLARE_LOG_CATEGORY_EXTERN(LogUAssetWorkbenchEditor, Log, All);
 
 // Exit codes every commandlet here returns. UE has no standard for this, Commandlet::Main just
 // returns int32. IssuesFound is an audit reporting a clean run that still found something to fix,
@@ -39,11 +40,14 @@ namespace UAssetWorkbench
     inline constexpr const TCHAR* MessageLogName = TEXT("UAssetWorkbench");
 
     // Which group a run belongs to. Decides how success is judged and where the result is reported.
+    // Export reads an asset out. Import regenerates one from a spec. Edit changes an existing one to
+    // match an intent. Migrate is asset-level bookkeeping: redirect, resave, replace.
     enum class EGroup : uint8
     {
         Export,
         Migrate,
         Import,
+        Edit,
         Audit
     };
 

@@ -14,21 +14,23 @@ An editor plugin that lets scripts and AI agents operate on Unreal Engine 5 uass
 | --- | --- |
 | Can't read | Logic and configuration are locked inside binary `.uasset` files, and an AI handed the file has nowhere to start. An EventGraph with hundreds of nodes has no readable text form, and abandoned variables, broken connections, wrong defaults are impossible to fully audit by eye in the editor. Montage notify timing, UMG hierarchy and keyframes, Niagara and material parameters, DataTable values, level actor placement and streaming config all exist only in the editor UI |
 | Can't write | Changing a UMG layout means dragging by hand in the editor, there is no version-controllable, replayable write path |
+| Can't change what exists | Adding a component to a Blueprint, wiring it into the graph and setting its default are three separate hand edits, and doing that across many Blueprints means doing it many times |
 | Can't fix after a rename | After a C++ or asset rename, CoreRedirects only fixes the call side. It cannot fix the implementation side or the consumer side inside Blueprint graphs, nor another level's import of the old path |
 | Can't audit | Broken references, level streaming topology, per-level component budget have no batch query entry point |
 
-Four problems, four capability groups.
+Five problems, five capability groups.
 
-## The four groups
+## The five groups
 
 | Group | What it does | Output | Count |
 | --- | --- | --- | --- |
 | Export | Read uasset structure, write JSON | JSON under `Intermediate/UAssetExport` | 11 |
 | Import | Read a JSON spec, write back to or create uassets | modified or new uassets | 3 |
-| Migrate | Fix references after a C++ or asset rename | modified uassets | 5 |
+| Edit | Change an existing uasset to match an intent | modified uassets | 1 |
+| Migrate | Fix references after a C++ or asset rename | modified uassets | 6 |
 | Audit | Read-only checks producing a report | report JSON | 2 |
 
-The group is decided by the run name: suffix `Export` is the Export group, suffix `Import` and prefix `Create` are the Import group, prefix `Audit` is the Audit group, everything else is Migrate. Naming-wise `Import` and `Export` are nouns used as suffixes, every other verb leads.
+The group is decided by the run name: suffix `Export` is the Export group, suffix `Import` and prefix `Create` are the Import group, prefix `Edit` is the Edit group, prefix `Audit` is the Audit group, everything else is Migrate. Naming-wise `Import` and `Export` are nouns used as suffixes, every other verb leads.
 
 ## Routing and architecture
 
@@ -78,6 +80,15 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
     "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject" \
     WidgetLayoutImport "/Game/UI/WBP_Foo" 10 600 \
     '-spec="C:/temp/WBP_Foo.spec.json"'
+```
+
+Edit.
+
+```bash
+MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
+    "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject" \
+    EditBlueprint "" 10 600 \
+    '-spec="C:/temp/BP_Foo.edit.json" -apply'
 ```
 
 Migrate.
@@ -515,7 +526,40 @@ Material node graphs are out of reach. `CreateAsset` produces an empty material,
 </details>
 
 <details>
-<summary><b>Migrate</b>, 5 commandlets</summary>
+<summary><b>Edit</b>, 1 commandlet</summary>
+
+Import regenerates an asset from a spec. Edit changes one that already exists, split along the same facets the editor's own Blueprint diff splits an asset into.
+
+| Spec key | Diff mode it mirrors | What it writes |
+| --- | --- | --- |
+| `Components` | `ComponentsMode` | SimpleConstructionScript component tree |
+| `Variables` | `MyBlueprintMode` | member variables |
+| `Defaults` | `DefaultsMode` | CDO and component template property values |
+| `Graph` | `GraphMode` | nodes, pin defaults, connections |
+| `Layout` | none, purely cosmetic | node positions |
+
+| RunName | What it does | Default |
+| --- | --- | --- |
+| `EditBlueprint` | Applies every facet the spec names to one Blueprint | dry run |
+
+One target loads the asset once, runs every writer the spec names, then compiles and saves once. A writer that fails aborts the whole target before anything is written, so a Blueprint never lands half-edited.
+
+Writers run in a fixed order regardless of key order in the spec, because each depends on the last.
+
+```
+Components -> Variables -> Defaults -> Graph -> Layout
+```
+
+`Graph` can reference components and variables the earlier writers made, and `Layout` addresses nodes by the Id `Graph` gave them. That dependency is why these are one commandlet rather than five.
+
+Nodes are addressed by Id. A node the spec creates takes whatever Id the spec gave it, a node that already exists takes the 32-hex NodeId `BlueprintEdGraphExport -graphs` prints, and both live in one namespace, so a new node can be wired straight onto an existing one. Connections go through `UEdGraphSchema_K2::TryCreateConnection`, which validates and inserts conversion nodes exactly as dragging a wire in the editor does.
+
+`Layout` carries `Arrange`, which lays a graph out from its topology so no coordinate has to be written by hand, and `Straighten`, which is the editor's Q. Slate has measured nothing in a headless run, so node extents come from title lines and pin rows rather than off a widget.
+
+</details>
+
+<details>
+<summary><b>Migrate</b>, 6 commandlets</summary>
 
 CoreRedirects covers the call side only, the implementation side and the consumer side inside Blueprint graphs are out of its range. A renamed interface event degrades a BP override into an orphaned custom event and the event stops firing, a renamed delegate parameter leaves a dangling pin on the binding node. Both still compile, and neither is findable by eye in a large project.
 
@@ -526,6 +570,7 @@ CoreRedirects covers the call side only, the implementation side and the consume
 | `ReparentBlueprint` | Changes a Blueprint's parent class | writes directly |
 | `ResaveAsset` | Forces load, compile, save so load-time fixups land on disk, after which that CoreRedirect can be dropped, supports Blueprint and map | writes directly |
 | `SanitizeLevelReference` | Repoints every reference to an old asset inside a level at the new asset, then resaves that level | writes directly, `-dryrun` only counts |
+| `DuplicateAsset` | Copies assets to new paths, the copy is independent and nothing is retargeted, and an existing destination is an error rather than an overwrite | dry run |
 
 Both redirects scan only by default, listing each Blueprint, event or node hit and how many wire groups would move, then take `-apply` to compile and save once it looks right. A scan with zero hits warns, check the `-OwnerClass` and the old name spelling first.
 
@@ -617,6 +662,7 @@ Prerequisites: Unreal Engine 5.7, and the plugin must be compiled with the proje
 | `Docs/AI-Guide.md` | Call manual for AI agents, decision table plus call templates plus common pitfalls |
 | `Docs/Export.md` | Export group detail |
 | `Docs/Import.md` | Import group detail and spec format |
+| `Docs/Edit.md` | Edit group detail, every spec key and every layout op |
 | `Docs/Migrate.md` | Migrate group detail |
 | `Docs/Audit.md` | Audit group detail and the stream metric workflow |
 
@@ -634,7 +680,7 @@ UE is only the proving ground, the three reusable parts do not depend on it.
 
 ## Version
 
-Current version: **2.0.0**
+Current version: **2.3.0**
 
 Defined in `src/Source/UAssetWorkbench/Public/UAssetWorkbenchVersion.h`, and embedded in the `ExporterVersion` field of every exported JSON.
 

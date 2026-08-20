@@ -21,9 +21,113 @@
 #include "Serialization/JsonWriter.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
+#include "UObject/UnrealType.h"
 
 namespace
 {
+    // One "Name" or "Name[3]" hop of a property path.
+    struct FPropertyPathHop
+    {
+        FString Name;
+        int32 Index = INDEX_NONE;
+    };
+
+    FPropertyPathHop ParsePropertyPathHop(const FString& Segment)
+    {
+        FPropertyPathHop Hop;
+
+        int32 Bracket = INDEX_NONE;
+        if (Segment.FindChar(TEXT('['), Bracket))
+        {
+            Hop.Name = Segment.Left(Bracket);
+            Hop.Index = FCString::Atoi(*Segment.Mid(Bracket + 1));
+            return Hop;
+        }
+
+        Hop.Name = Segment;
+        return Hop;
+    }
+
+    // Walks "Array[2].Field" down to the property that takes the value. Owner tracks the last instanced
+    // sub-object crossed, ImportText resolves object references against it.
+    bool ResolvePropertyPath(UObject* Root, const FString& Path, FProperty*& OutProperty, void*& OutAddress, UObject*& OutOwner)
+    {
+        TArray<FString> Segments;
+        Path.ParseIntoArray(Segments, TEXT("."));
+        if (Segments.IsEmpty())
+        {
+            return false;
+        }
+
+        UStruct* Struct = Root->GetClass();
+        void* Base = Root;
+        UObject* Owner = Root;
+
+        for (int32 SegmentIndex = 0; SegmentIndex < Segments.Num(); ++SegmentIndex)
+        {
+            const FPropertyPathHop Hop = ParsePropertyPathHop(Segments[SegmentIndex]);
+
+            FProperty* Property = Struct->FindPropertyByName(FName(*Hop.Name));
+            if (!Property)
+            {
+                return false;
+            }
+
+            void* Address = Property->ContainerPtrToValuePtr<void>(Base);
+
+            if (Hop.Index != INDEX_NONE)
+            {
+                FArrayProperty* ArrayProperty = CastField<FArrayProperty>(Property);
+                if (!ArrayProperty)
+                {
+                    return false;
+                }
+
+                FScriptArrayHelper Helper(ArrayProperty, Address);
+                if (!Helper.IsValidIndex(Hop.Index))
+                {
+                    return false;
+                }
+
+                Property = ArrayProperty->Inner;
+                Address = Helper.GetRawPtr(Hop.Index);
+            }
+
+            const bool bLastSegment = SegmentIndex == Segments.Num() - 1;
+            if (bLastSegment)
+            {
+                OutProperty = Property;
+                OutAddress = Address;
+                OutOwner = Owner;
+                return true;
+            }
+
+            if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
+            {
+                Struct = StructProperty->Struct;
+                Base = Address;
+                continue;
+            }
+
+            if (const FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property))
+            {
+                UObject* Inner = ObjectProperty->GetObjectPropertyValue(Address);
+                if (!Inner)
+                {
+                    return false;
+                }
+
+                Struct = Inner->GetClass();
+                Base = Inner;
+                Owner = Inner;
+                continue;
+            }
+
+            return false;
+        }
+
+        return false;
+    }
     // Strip an object suffix so "/Game/Maps/L_A.L_A" and "/Game/Maps/L_A" both yield the package name.
     FString ToPackageName(const FString& Path)
     {
@@ -124,21 +228,21 @@ int32 UAssetWorkbench::ApplyProperties(UObject* Target, const TSharedPtr<FJsonOb
 
     for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Properties->Values)
     {
-        FProperty* Property = Target->GetClass()->FindPropertyByName(FName(*Pair.Key));
-        if (!Property)
+        FProperty* Property = nullptr;
+        void* Address = nullptr;
+        UObject* Owner = nullptr;
+        if (!ResolvePropertyPath(Target, Pair.Key, Property, Address, Owner))
         {
-            UE_LOG(LogUAssetWorkbenchCore, Error, TEXT("No property %s on %s"), *Pair.Key, *Target->GetClass()->GetName());
+            UE_LOG(LogUAssetWorkbenchCore, Error, TEXT("Cannot resolve %s on %s"), *Pair.Key, *Target->GetClass()->GetName());
             ++OutFailures;
             continue;
         }
-
-        void* Address = Property->ContainerPtrToValuePtr<void>(Target);
 
         // A string is the exporter's own format, the json converter cannot read those struct literals.
         FString StringValue;
         if (Pair.Value->TryGetString(StringValue))
         {
-            if (Property->ImportText_Direct(*StringValue, Address, Target, PPF_None))
+            if (Property->ImportText_Direct(*StringValue, Address, Owner, PPF_None))
             {
                 ++Written;
                 continue;
