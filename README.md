@@ -680,7 +680,7 @@ UE is only the proving ground, the three reusable parts do not depend on it.
 
 ## Version
 
-Current version: **2.3.0**
+Current version: **2.3.1**
 
 Defined in `src/Source/UAssetWorkbench/Public/UAssetWorkbenchVersion.h`, and embedded in the `ExporterVersion` field of every exported JSON.
 

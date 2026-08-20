@@ -13,7 +13,6 @@
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
 #include "IDirectoryWatcher.h"
-#include "Logging/MessageLog.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
@@ -246,14 +245,24 @@ void UAssetExportQueueSubsystem::ProcessTaskFile(const FString& PendingPath)
     FString ExtraArgs;
     Task->TryGetStringField(UAssetExportQueue::FieldExtraArgs, ExtraArgs);
 
-    if (RunName.IsEmpty() || Assets.IsEmpty())
+    if (RunName.IsEmpty())
     {
-        WriteDoneFile(DonePath, 2, {}, TEXT("Pending task missing RunName or Assets"));
+        WriteDoneFile(DonePath, 2, {}, TEXT("Pending task missing RunName"));
         IFileManager::Get().Delete(*ProcessingPath);
         return;
     }
 
     const bool bIsExport = UAssetWorkbench::ResolveGroup(RunName) == UAssetWorkbench::EGroup::Export;
+
+    // Export needs the list to know what to wait for. Every spec-driven run names its targets in the
+    // spec, and demanding a list there only got callers to pass an unrelated path as a placeholder,
+    // which then showed up in the summary as if the run had touched it.
+    if (bIsExport && Assets.IsEmpty())
+    {
+        WriteDoneFile(DonePath, 2, {}, TEXT("Export task missing Assets"));
+        IFileManager::Get().Delete(*ProcessingPath);
+        return;
+    }
 
     TSharedPtr<SNotificationItem> Toast;
     if (bIsExport)
@@ -262,6 +271,9 @@ void UAssetExportQueueSubsystem::ProcessTaskFile(const FString& PendingPath)
     }
 
     const FString AssetsCsv = FString::Join(Assets, TEXT(","));
+
+    // Alive across the dispatch only, so the page holds exactly this run's lines.
+    UAssetWorkbench::FRunReport Report(RunName);
     const int32 RunExitCode = DispatchRun(RunName, AssetsCsv, ExtraArgs);
 
     // An audit that found something still ran correctly, only Failed and EditorConflict are dispatch failures.
@@ -304,7 +316,9 @@ void UAssetExportQueueSubsystem::ProcessTaskFile(const FString& PendingPath)
     WriteDoneFile(DonePath, ExitCode, Outputs, ErrorMessage);
     IFileManager::Get().Delete(*ProcessingPath);
 
-    const FString AssetNames = FormatAssetNames(Assets);
+    // Naming the asset list only means something when the run was actually driven by one.
+    const FString AssetNames = Assets.IsEmpty() ? FString() : FormatAssetNames(Assets);
+    const FString Subject = AssetNames.IsEmpty() ? FString() : TEXT(": ") + AssetNames;
     FString Summary;
     if (bIsExport && bSuccess)
     {
@@ -316,41 +330,30 @@ void UAssetExportQueueSubsystem::ProcessTaskFile(const FString& PendingPath)
     }
     else if (bHasFindings)
     {
-        Summary = FString::Printf(TEXT("%s found issues: %s"), *RunName, *AssetNames);
+        Summary = FString::Printf(TEXT("%s found issues%s"), *RunName, *Subject);
     }
     else if (bSuccess)
     {
-        Summary = FString::Printf(TEXT("%s done: %s"), *RunName, *AssetNames);
+        Summary = FString::Printf(TEXT("%s done%s"), *RunName, *Subject);
     }
     else
     {
-        Summary = FString::Printf(TEXT("%s failed: %s"), *RunName, *AssetNames);
+        Summary = FString::Printf(TEXT("%s failed%s"), *RunName, *Subject);
     }
+
+    // A run can exit clean and still have warned about something worth reading.
+    if (Report.GetWarningCount() > 0 || Report.GetErrorCount() > 0)
+    {
+        Summary = FString::Printf(TEXT("%s (%d warning(s), %d error(s))"), *Summary, Report.GetWarningCount(), Report.GetErrorCount());
+    }
+
+    // Findings are not a failure but must not read as clean either.
+    Report.Finish(Summary, bSuccess && !bHasFindings);
 
     if (bIsExport)
     {
         FinishToast(Toast, bSuccess, Summary);
-        return;
     }
-
-    // Findings are not a failure but must not read as clean either.
-    ReportToMessageLog(bSuccess && !bHasFindings, Summary);
-}
-
-void UAssetExportQueueSubsystem::ReportToMessageLog(bool bSuccess, const FString& Summary)
-{
-    const FName ListingName(UAssetWorkbench::MessageLogName);
-    FMessageLog Log(ListingName);
-    if (bSuccess)
-    {
-        Log.Info(FText::FromString(Summary));
-    }
-    else
-    {
-        Log.Error(FText::FromString(Summary));
-    }
-
-    Log.Open(bSuccess ? EMessageSeverity::Info : EMessageSeverity::Error, /* bOpenEvenIfEmpty */ false);
 }
 
 int32 UAssetExportQueueSubsystem::DispatchRun(const FString& RunName, const FString& AssetsCsv, const FString& ExtraArgs) const

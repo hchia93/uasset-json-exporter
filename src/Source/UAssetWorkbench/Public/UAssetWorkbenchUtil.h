@@ -1,11 +1,42 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Misc/OutputDevice.h"
 
 class FJsonObject;
 
 namespace UAssetWorkbench
 {
+    // Everything a run says, on one Message Log page named after that run.
+    //
+    // Commandlets only ever UE_LOG, which lands in the output log and scrolls away. Alive for the
+    // duration of a run, this taps GLog and mirrors every LogUAssetWorkbench* line onto the listing,
+    // so a run that already finished can still be read back, and so a warning a run buried among a
+    // hundred Display lines is one filter click away. Nothing in a commandlet has to know it exists.
+    //
+    // Mirroring is one-way on purpose: the FMessageLog used here suppresses its own write back to the
+    // output log, otherwise every captured line would come straight back in.
+    class FRunReport : public FOutputDevice
+    {
+    public:
+        explicit FRunReport(const FString& RunName);
+        virtual ~FRunReport();
+
+        virtual void Serialize(const TCHAR* Message, ELogVerbosity::Type Verbosity, const FName& Category) override;
+
+        int32 GetWarningCount() const { return m_WarningCount; }
+        int32 GetErrorCount() const { return m_ErrorCount; }
+
+        // Closing line on the page. Severity follows what the run actually reported.
+        void Finish(const FString& Summary, bool bSuccess);
+
+    private:
+        FString m_RunName;
+        int32 m_WarningCount = 0;
+        int32 m_ErrorCount = 0;
+        bool m_bEmitting = false;
+    };
+
     // Parse "-<ParamName>A,B,C" out of a commandlet param string. Trims quotes and whitespace.
     // ParamName carries its own leading dash and trailing equals, e.g. TEXT("-blueprints=").
     TArray<FString> ParsePathList(const FString& Params, const TCHAR* ParamName);

@@ -50,7 +50,16 @@ public:
 
 private:
 
-    UObject* CreateOne(const TSharedPtr<FJsonObject>& Entry) const;
+    // Skipped is not Created. Reporting an existing asset as created is how a caller ends up
+    // believing a run did something it did not.
+    enum class EOutcome : uint8
+    {
+        Created,
+        Skipped,
+        Failed
+    };
+
+    EOutcome CreateOne(const TSharedPtr<FJsonObject>& Entry) const;
 
     static UClass* ResolveAssetClass(const FString& ClassName);
 

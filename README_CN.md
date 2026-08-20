@@ -680,7 +680,7 @@ UE 只是验证场，三样可复用的东西不依赖它。
 
 ## 版本
 
-当前版本: **2.3.0**
+当前版本: **2.3.1**
 
 定义在 `src/Source/UAssetWorkbench/Public/UAssetWorkbenchVersion.h`，同时嵌进每份导出 JSON 的 `ExporterVersion` 字段。
 

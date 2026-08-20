@@ -44,7 +44,6 @@ private:
     static void FinishToast(TSharedPtr<SNotificationItem> Item, bool bSuccess, const FString& Summary);
 
     // Mutating runs report here instead of a toast, the entry survives past the toast fade.
-    static void ReportToMessageLog(bool bSuccess, const FString& Summary);
 
     FTSTicker::FDelegateHandle m_HeartbeatHandle;
     FDelegateHandle m_DirectoryWatcherHandle;

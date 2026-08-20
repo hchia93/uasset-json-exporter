@@ -11,6 +11,7 @@
 #include "Engine/World.h"
 #include "HAL/FileManager.h"
 #include "JsonObjectConverter.h"
+#include "Logging/MessageLog.h"
 #include "Misc/DateTime.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/FileHelper.h"
@@ -390,4 +391,98 @@ TSharedPtr<FJsonObject> UAssetWorkbench::ExportSubclassProperties(UObject* Objec
     }
 
     return Props;
+}
+
+namespace
+{
+    // Only this plugin's own categories get mirrored, the engine talks far too much otherwise.
+    bool IsWorkbenchCategory(const FName& Category)
+    {
+        static const TSet<FName> Categories = {
+            LogUAssetWorkbenchCore.GetCategoryName(),
+            LogUAssetWorkbenchExporter.GetCategoryName(),
+            LogUAssetWorkbenchMigrator.GetCategoryName(),
+            LogUAssetWorkbenchImporter.GetCategoryName(),
+            LogUAssetWorkbenchEditor.GetCategoryName(),
+            LogUAssetWorkbenchAuditor.GetCategoryName(),
+        };
+
+        return Categories.Contains(Category);
+    }
+
+    // Verbose and below is tracing, not a report, and does not belong on the page.
+    bool ToMessageSeverity(ELogVerbosity::Type Verbosity, EMessageSeverity::Type& OutSeverity)
+    {
+        switch (Verbosity)
+        {
+        case ELogVerbosity::Fatal:
+        case ELogVerbosity::Error:
+            OutSeverity = EMessageSeverity::Error;
+            return true;
+        case ELogVerbosity::Warning:
+            OutSeverity = EMessageSeverity::Warning;
+            return true;
+        case ELogVerbosity::Display:
+        case ELogVerbosity::Log:
+            OutSeverity = EMessageSeverity::Info;
+            return true;
+        default:
+            return false;
+        }
+    }
+}
+
+UAssetWorkbench::FRunReport::FRunReport(const FString& RunName)
+    : m_RunName(RunName)
+{
+    FMessageLog(FName(MessageLogName)).NewPage(FText::FromString(RunName));
+    GLog->AddOutputDevice(this);
+}
+
+UAssetWorkbench::FRunReport::~FRunReport()
+{
+    GLog->RemoveOutputDevice(this);
+}
+
+void UAssetWorkbench::FRunReport::Serialize(const TCHAR* Message, ELogVerbosity::Type Verbosity, const FName& Category)
+{
+    // FMessageLog logs on its own account, and a run can log off the game thread.
+    if (m_bEmitting || !IsInGameThread() || !IsWorkbenchCategory(Category))
+    {
+        return;
+    }
+
+    EMessageSeverity::Type Severity = EMessageSeverity::Info;
+    if (!ToMessageSeverity(Verbosity, Severity))
+    {
+        return;
+    }
+
+    if (Severity == EMessageSeverity::Error)
+    {
+        ++m_ErrorCount;
+    }
+    else if (Severity == EMessageSeverity::Warning)
+    {
+        ++m_WarningCount;
+    }
+
+    TGuardValue<bool> Emitting(m_bEmitting, true);
+    FMessageLog(FName(MessageLogName)).SuppressLoggingToOutputLog().Message(Severity, FText::FromString(Message));
+}
+
+void UAssetWorkbench::FRunReport::Finish(const FString& Summary, bool bSuccess)
+{
+    const EMessageSeverity::Type Severity = bSuccess ? EMessageSeverity::Info : EMessageSeverity::Error;
+
+    TGuardValue<bool> Emitting(m_bEmitting, true);
+    const FName ListingName(MessageLogName);
+    FMessageLog Log(ListingName);
+    Log.SuppressLoggingToOutputLog().Message(Severity, FText::FromString(Summary));
+
+    // A clean run should not steal focus, anything else should be noticed without opening the log.
+    if (!bSuccess || m_ErrorCount > 0 || m_WarningCount > 0)
+    {
+        Log.Notify(FText::FromString(Summary), EMessageSeverity::Info, true);
+    }
 }

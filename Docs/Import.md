@@ -103,7 +103,7 @@ RunName: `WidgetLayoutImport`
 
 ### 调用
 
-目标资产路径放 `AssetList`，用于通知显示，spec 走 `EXTRA_ARGS`。
+spec 走 `EXTRA_ARGS`，`AssetList` 传空串。目标写在 spec 里，位置参数里再写一遍只会让摘要冒认一个 run 没碰过的资产。
 
 ```bash
 bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
@@ -226,7 +226,7 @@ RunName: `CreateAsset`
 
 ### 调用
 
-目标资产还不存在，`AssetList` 传空串。
+`-unattended` 必填，`FMessageDialog` 不检查 commandlet 模式，有些路径会卡住。
 
 ```bash
 bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \

@@ -64,6 +64,7 @@ int32 UCreateAssetCommandlet::Main(const FString& Params)
     }
 
     int32 Created = 0;
+    int32 Skipped = 0;
     int32 Failures = 0;
 
     for (const TSharedPtr<FJsonValue>& Value : *Assets)
@@ -71,30 +72,38 @@ int32 UCreateAssetCommandlet::Main(const FString& Params)
         const TSharedPtr<FJsonObject>* Entry = nullptr;
         if (!Value->TryGetObject(Entry))
         {
+            UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("Assets carries an entry that is not an object"));
             ++Failures;
             continue;
         }
 
-        if (CreateOne(*Entry))
+        switch (CreateOne(*Entry))
         {
+        case EOutcome::Created:
             ++Created;
-            continue;
+            break;
+        case EOutcome::Skipped:
+            ++Skipped;
+            break;
+        default:
+            ++Failures;
+            break;
         }
-
-        ++Failures;
     }
 
     if (Failures > 0)
     {
-        UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("CreateAsset: %d created, %d failed"), Created, Failures);
+        UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("CreateAsset: %d created, %d already existed, %d failed"), Created, Skipped, Failures);
         return ToExitCode(EUAssetWorkbenchExitType::Failed);
     }
 
-    UE_LOG(LogUAssetWorkbenchImporter, Display, TEXT("CreateAsset: %d asset(s) created"), Created);
+    // Saying "created" when every entry already existed is how a caller ends up believing a run did
+    // something it did not, so the skip count is stated even when it is the whole run.
+    UE_LOG(LogUAssetWorkbenchImporter, Display, TEXT("CreateAsset: %d created, %d already existed"), Created, Skipped);
     return ToExitCode(EUAssetWorkbenchExitType::Success);
 }
 
-UObject* UCreateAssetCommandlet::CreateOne(const TSharedPtr<FJsonObject>& Entry) const
+UCreateAssetCommandlet::EOutcome UCreateAssetCommandlet::CreateOne(const TSharedPtr<FJsonObject>& Entry) const
 {
     FString PackagePath;
     FString AssetName;
@@ -102,21 +111,21 @@ UObject* UCreateAssetCommandlet::CreateOne(const TSharedPtr<FJsonObject>& Entry)
     if (!Entry->TryGetStringField(TEXT("PackagePath"), PackagePath) || !Entry->TryGetStringField(TEXT("AssetName"), AssetName) || !Entry->TryGetStringField(TEXT("Class"), ClassName))
     {
         UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("Entry needs PackagePath, AssetName and Class"));
-        return nullptr;
+        return EOutcome::Failed;
     }
 
     const FString ObjectPath = FString::Printf(TEXT("%s/%s.%s"), *PackagePath, *AssetName, *AssetName);
-    if (UObject* Existing = LoadObject<UObject>(nullptr, *ObjectPath))
+    if (LoadObject<UObject>(nullptr, *ObjectPath))
     {
-        UE_LOG(LogUAssetWorkbenchImporter, Warning, TEXT("Already exists, skipped: %s"), *ObjectPath);
-        return Existing;
+        UE_LOG(LogUAssetWorkbenchImporter, Warning, TEXT("Already exists, nothing created: %s"), *ObjectPath);
+        return EOutcome::Skipped;
     }
 
     UClass* AssetClass = ResolveAssetClass(ClassName);
     if (!AssetClass)
     {
         UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("Unresolved class: %s"), *ClassName);
-        return nullptr;
+        return EOutcome::Failed;
     }
 
     UFactory* Factory = ResolveFactory(AssetClass);
@@ -127,7 +136,7 @@ UObject* UCreateAssetCommandlet::CreateOne(const TSharedPtr<FJsonObject>& Entry)
         if (!Factory)
         {
             UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("FactoryProperties given but no factory supports %s"), *ClassName);
-            return nullptr;
+            return EOutcome::Failed;
         }
 
         int32 FactoryFailures = 0;
@@ -135,7 +144,7 @@ UObject* UCreateAssetCommandlet::CreateOne(const TSharedPtr<FJsonObject>& Entry)
         if (FactoryFailures > 0)
         {
             UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("%d factory propert(ies) failed for %s"), FactoryFailures, *AssetName);
-            return nullptr;
+            return EOutcome::Failed;
         }
     }
 
@@ -146,7 +155,7 @@ UObject* UCreateAssetCommandlet::CreateOne(const TSharedPtr<FJsonObject>& Entry)
     if (!Asset)
     {
         UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("CreateAsset returned nothing for %s, check the factory's required fields"), *AssetName);
-        return nullptr;
+        return EOutcome::Failed;
     }
 
     const TSharedPtr<FJsonObject>* Properties = nullptr;
@@ -157,7 +166,7 @@ UObject* UCreateAssetCommandlet::CreateOne(const TSharedPtr<FJsonObject>& Entry)
         if (PropertyFailures > 0)
         {
             UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("%d propert(ies) failed on %s"), PropertyFailures, *AssetName);
-            return nullptr;
+            return EOutcome::Failed;
         }
     }
 
@@ -167,11 +176,11 @@ UObject* UCreateAssetCommandlet::CreateOne(const TSharedPtr<FJsonObject>& Entry)
     if (!UAssetWorkbench::CompileAndSavePackage(Asset, /* bCompileBlueprint */ false))
     {
         UE_LOG(LogUAssetWorkbenchImporter, Error, TEXT("Failed to save %s"), *ObjectPath);
-        return nullptr;
+        return EOutcome::Failed;
     }
 
     UE_LOG(LogUAssetWorkbenchImporter, Display, TEXT("Created %s"), *ObjectPath);
-    return Asset;
+    return EOutcome::Created;
 }
 
 UClass* UCreateAssetCommandlet::ResolveAssetClass(const FString& ClassName)

@@ -56,7 +56,7 @@ bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
     "/Game/Blueprints/BP_Foo,/Game/Blueprints/BP_Baz"
 ```
 
-Import。三个 commandlet 都用 `-spec=` 指向 spec 绝对路径，走 `EXTRA_ARGS`，目标资产路径放 `AssetList` 用于通知显示。
+Import。三个 commandlet 都用 `-spec=` 指向 spec 绝对路径，走 `EXTRA_ARGS`，`AssetList` 传空串。
 
 ```bash
 bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
@@ -70,7 +70,7 @@ bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
 
 `DataAssetImport` 同形，换 RunName 与资产路径即可。
 
-`CreateAsset` 两处不同: 目标资产还不存在，`AssetList` 传空串，且 `-unattended` 必填。
+`CreateAsset` 额外要求 `-unattended`。已存在的资产会被跳过并报 warning，不会覆盖，结尾统计里 created 与 already existed 分开计数。
 
 ```bash
 bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
@@ -107,6 +107,16 @@ bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
 ```
 
 Audit。不吃 `AssetList`，位置参数留空串。
+
+## 跑完了去哪看
+
+编辑器开着时走 queue 路径，每个 run 在 Message Log 的 `UAsset Workbench` 面板下开一页，页名就是 run 名。run 自己的每一行日志（`LogUAssetWorkbench*` 全部六个 category）都镜像到那一页，按 Info / Warning / Error 分级，可以用面板顶部的 filter 只看 warning 和 error。
+
+页是历史，跑完不会消失，之后回头翻得到。摘要行在页尾，带 warning 与 error 计数。只要计数非零就弹 toast，干净的 run 不打扰。
+
+编辑器关着时走 commandlet 路径，没有 UI，记录在 `Saved/Logs/` 下的日志文件里。
+
+摘要行**只在 run 确实由 `AssetList` 驱动时**才带资产名。spec 驱动的 run（`Create*` / `*Import` / `Edit*`）摘要不带名字，因为它们碰了哪些资产写在 spec 里，位置参数说了不算。
 
 ```bash
 bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
