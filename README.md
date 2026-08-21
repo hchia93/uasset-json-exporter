@@ -26,7 +26,7 @@ Five problems, five capability groups.
 | --- | --- | --- | --- |
 | Export | Read uasset structure, write JSON | JSON under `Intermediate/UAssetExport` | 11 |
 | Import | Read a JSON spec, write back to or create uassets | modified or new uassets | 3 |
-| Edit | Change an existing uasset to match an intent | modified uassets | 1 |
+| Edit | Change an existing uasset to match an intent | modified uassets | 2 |
 | Migrate | Fix references after a C++ or asset rename | modified uassets | 6 |
 | Audit | Read-only checks producing a report | report JSON | 2 |
 
@@ -526,9 +526,9 @@ Material node graphs are out of reach. `CreateAsset` produces an empty material,
 </details>
 
 <details>
-<summary><b>Edit</b>, 1 commandlet</summary>
+<summary><b>Edit</b>, 2 commandlets</summary>
 
-Import regenerates an asset from a spec. Edit changes one that already exists, split along the same facets the editor's own Blueprint diff splits an asset into.
+Import regenerates an asset from a spec. Edit changes one that already exists, one writer per facet. `EditBlueprint` splits along the same facets the editor's own Blueprint diff splits a Blueprint into, `EditAnimMontage` covers a montage's notifies.
 
 | Spec key | Diff mode it mirrors | What it writes |
 | --- | --- | --- |
@@ -541,6 +541,7 @@ Import regenerates an asset from a spec. Edit changes one that already exists, s
 | RunName | What it does | Default |
 | --- | --- | --- |
 | `EditBlueprint` | Applies every facet the spec names to one Blueprint | dry run |
+| `EditAnimMontage` | Adds, modifies and removes the notifies the spec names on one AnimMontage | dry run |
 
 One target loads the asset once, runs every writer the spec names, then compiles and saves once. A writer that fails aborts the whole target before anything is written, so a Blueprint never lands half-edited.
 
@@ -680,7 +681,7 @@ UE is only the proving ground, the three reusable parts do not depend on it.
 
 ## Version
 
-Current version: **2.3.1**
+Current version: **2.3.2**
 
 Defined in `src/Source/UAssetWorkbench/Public/UAssetWorkbenchVersion.h`, and embedded in the `ExporterVersion` field of every exported JSON.
 

@@ -26,7 +26,7 @@
 | --- | --- | --- | --- |
 | Export | 读 uasset 结构导出 JSON | `Intermediate/UAssetExport` 下的 JSON | 11 |
 | Import | 读 JSON spec 写回或创建 uasset | 被修改或新建的 uasset | 3 |
-| Edit | 按意图修改既有 uasset | 被修改的 uasset | 1 |
+| Edit | 按意图修改既有 uasset | 被修改的 uasset | 2 |
 | Migrate | C++ 或资产改名后修复引用 | 被修改的 uasset | 6 |
 | Audit | 只读检查产出报告 | 报告 JSON | 2 |
 
@@ -526,9 +526,9 @@ spec 顶层字段。
 </details>
 
 <details>
-<summary><b>Edit</b>，1 个 commandlet</summary>
+<summary><b>Edit</b>，2 个 commandlet</summary>
 
-Import 是照 spec 重新生成一份资产，Edit 是改动既有的那一份，划分对齐编辑器自己的 Blueprint diff 把资产拆成的几个面。
+Import 是照 spec 重新生成一份资产，Edit 是改动既有的那一份，一个面配一个 writer。`EditBlueprint` 的划分对齐编辑器自己的 Blueprint diff 把蓝图拆成的几个面，`EditAnimMontage` 管 montage 的 notify。
 
 | Spec key | 对应 diff mode | 写什么 |
 | --- | --- | --- |
@@ -541,6 +541,7 @@ Import 是照 spec 重新生成一份资产，Edit 是改动既有的那一份�
 | RunName | 做什么 | 默认行为 |
 | --- | --- | --- |
 | `EditBlueprint` | 把 spec 点名的每个面应用到一个 Blueprint 上 | dry run |
+| `EditAnimMontage` | 按 spec 增删改一个 AnimMontage 上的 notify | dry run |
 
 一个 target 只 load 一次资产，跑完 spec 点名的所有 writer，编译保存一次。任一 writer 失败整个 target 在落盘前中止，蓝图不会停在改了一半的状态。
 
@@ -680,7 +681,7 @@ UE 只是验证场，三样可复用的东西不依赖它。
 
 ## 版本
 
-当前版本: **2.3.1**
+当前版本: **2.3.2**
 
 定义在 `src/Source/UAssetWorkbench/Public/UAssetWorkbenchVersion.h`，同时嵌进每份导出 JSON 的 `ExporterVersion` 字段。
 

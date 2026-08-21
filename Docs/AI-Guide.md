@@ -27,6 +27,8 @@
 | 一次改完同一个 BP 的多个方面，要么全成要么不落盘 | `EditBlueprint` | Edit |
 | 生成完的图要排版，不想手写坐标 | `EditBlueprint` 的 `Layout` `Arrange` | Edit |
 | 连线歪了要拉平，等同编辑器里按 Q | `EditBlueprint` 的 `Layout` `Straighten` | Edit |
+| 给 montage 加 notify，或改既有 notify 的时间、轨道、参数 | `EditAnimMontage` | Edit |
+| 把 `AnimMontageExport` 导出的 notify 参数改完喂回资产 | `EditAnimMontage` | Edit |
 | C++ 改名后 BP 事件不再触发 | `RedirectBlueprintEvent` | Migrate |
 | delegate 参数改名后绑定处留下悬空连线 | `RedirectBlueprintPin` | Migrate |
 | 图逻辑搬进 C++ 后，BP 图里作废的那几个节点要删掉 | `DeleteBlueprintNode` | Migrate |
