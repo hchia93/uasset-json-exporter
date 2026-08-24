@@ -198,9 +198,10 @@ namespace
 
             BlueprintEdit::RegisterExistingNodes(Context.Graph, Context.NodesById);
 
-            // Fixed order: create, set defaults, unlink, link. Unlink before Links so one pass can
-            // re-route an existing exec chain instead of leaving it doubly connected.
-            if (!ApplyNodes(Context, Entry) || !ApplyPinDefaults(Context, Entry) || !ApplyUnlink(Context, Entry) || !ApplyLinks(Context, Entry))
+            // Fixed order: create, set defaults, unlink, link, delete. Unlink before Links so one pass
+            // can re-route an existing exec chain instead of leaving it doubly connected, Delete runs last
+            // so the same pass can splice around a node before dropping it.
+            if (!ApplyNodes(Context, Entry) || !ApplyPinDefaults(Context, Entry) || !ApplyUnlink(Context, Entry) || !ApplyLinks(Context, Entry) || !ApplyDelete(Context, Entry))
             {
                 return false;
             }
@@ -406,6 +407,56 @@ namespace
                     UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: schema rejected %s.%s -> %s.%s"), *Context.AssetPath, *FromNode, *FromPin, *ToNode, *ToPin);
                     return false;
                 }
+            }
+
+            return true;
+        }
+
+        bool ApplyDelete(FBlueprintEditContext& Context, const TSharedPtr<FJsonObject>& Entry) const
+        {
+            const TArray<TSharedPtr<FJsonValue>>* Delete = nullptr;
+            if (!Entry->TryGetArrayField(TEXT("Delete"), Delete))
+            {
+                return true;
+            }
+
+            for (const TSharedPtr<FJsonValue>& Value : *Delete)
+            {
+                const TSharedPtr<FJsonObject>& Desc = Value->AsObject();
+                FString NodeId;
+                if (!Desc.IsValid() || !Desc->TryGetStringField(TEXT("Node"), NodeId))
+                {
+                    UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: Delete entry needs Node"), *Context.AssetPath);
+                    return false;
+                }
+
+                UEdGraphNode** Found = Context.NodesById.Find(NodeId);
+                if (!Found || !*Found)
+                {
+                    UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: no node '%s' to delete"), *Context.AssetPath, *NodeId);
+                    return false;
+                }
+
+                UEdGraphNode* Node = *Found;
+
+                // Entry and result nodes refuse deletion in the editor, a spec gets the same answer.
+                if (!Node->CanUserDeleteNode())
+                {
+                    UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: node '%s' (%s) cannot be deleted"), *Context.AssetPath, *NodeId, *Node->GetClass()->GetName());
+                    return false;
+                }
+
+                UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("  %s: delete %s (%s)"), *Context.Blueprint->GetName(), *NodeId, *Node->GetClass()->GetName());
+                ++Context.Ops;
+
+                if (!Context.bApply)
+                {
+                    continue;
+                }
+
+                // Layout addresses nodes by Id after this writer, a dropped node must not stay addressable.
+                Context.NodesById.Remove(NodeId);
+                FBlueprintEditorUtils::RemoveNode(Context.Blueprint, Node, /*bDontRecompile=*/true);
             }
 
             return true;

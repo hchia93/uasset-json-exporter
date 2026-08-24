@@ -71,7 +71,8 @@ bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
         ],
         "PinDefaults": [ { "Node": "gate", "Pin": "bStartClosed", "Value": "true" } ],
         "Unlink": [ { "Node": "A1B2...", "Pin": "then" } ],
-        "Links": [ { "FromNode": "ev", "FromPin": "then", "ToNode": "gate", "ToPin": "Enter" } ]
+        "Links": [ { "FromNode": "ev", "FromPin": "then", "ToNode": "gate", "ToPin": "Enter" } ],
+        "Delete": [ { "Node": "C3D4..." } ]
       },
       "Layout": [
         { "Op": "StackHorizontal", "Nodes": ["ev", "gate"], "Spacing": 140 }
@@ -115,7 +116,9 @@ BP 自己声明的组件属性挂在 SCS node 的 template 上，继承来的 na
 
 节点用 `Id` 寻址。本次新建的节点用 spec 给的 `Id`，已存在的节点用 `BlueprintEdGraphExport -graphs` 打印的 32 位 `NodeId`，两者同一命名空间，新节点可以直接接到旧节点上。Pin 名内部名和编辑器显示的 friendly name 都认。
 
-执行顺序：建节点 → pin 默认值 → `Unlink` → `Links`。`Unlink` 在 `Links` 之前，所以一次 pass 就能改道既有的 exec 链。
+执行顺序：建节点 → pin 默认值 → `Unlink` → `Links` → `Delete`。`Unlink` 在 `Links` 之前，所以一次 pass 就能改道既有的 exec 链；`Delete` 收尾，所以同一 pass 能先把上下游接起来再把中间节点删掉。
+
+`Delete` 按 `Id` 删节点，连线一并断开。引擎不允许用户删的节点（函数入口、result 等）报错，与编辑器里的行为一致。
 
 连线走 `UEdGraphSchema_K2::TryCreateConnection`，与编辑器里拖线同路，会校验并在需要时插转换节点。schema 拒绝的连线是错误。
 
