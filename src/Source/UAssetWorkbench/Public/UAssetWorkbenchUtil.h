@@ -7,15 +7,9 @@ class FJsonObject;
 
 namespace UAssetWorkbench
 {
-    // Everything a run says, on one Message Log page named after that run.
-    //
-    // Commandlets only ever UE_LOG, which lands in the output log and scrolls away. Alive for the
-    // duration of a run, this taps GLog and mirrors every LogUAssetWorkbench* line onto the listing,
-    // so a run that already finished can still be read back, and so a warning a run buried among a
-    // hundred Display lines is one filter click away. Nothing in a commandlet has to know it exists.
-    //
-    // Mirroring is one-way on purpose: the FMessageLog used here suppresses its own write back to the
-    // output log, otherwise every captured line would come straight back in.
+    // Taps GLog for the length of a run and mirrors every LogUAssetWorkbench* line onto one Message Log
+    // page, so a finished run reads back and a buried warning is one filter click away. Mirroring is
+    // one-way, the listing suppresses its own write back or every captured line would return.
     class FRunReport : public FOutputDevice
     {
     public:
@@ -45,16 +39,36 @@ namespace UAssetWorkbench
     TArray<FString> ParseAssetPaths(const FString& Params);
 
     // Compile Blueprints, mark dirty, write the package to disk. Extension follows level vs asset.
+    // A Blueprint that comes out of the compile in error is not saved, the call returns false instead.
     bool CompileAndSavePackage(UObject* Asset, bool bCompileBlueprint = true);
 
-    // Write JSON values onto an object by property path. A bare name is the object's own property,
-    // "Array[2].Field" reaches inside arrays, structs and instanced sub-objects. A string goes through
-    // ImportText, which is the exporter's own format, anything else goes through the json converter.
-    // Returns properties written, OutFailures counts the ones that resolved but would not take.
+    // Property path takes "Array[2].Field" to reach inside arrays, structs and instanced sub-objects. A
+    // string value goes through ImportText, the exporter's own format, anything else through the converter.
     int32 ApplyProperties(UObject* Target, const TSharedPtr<FJsonObject>& Properties, int32& OutFailures);
 
     // Map a /Game/... asset path to <ProjectDir>/Intermediate/UAssetExport/Game/.../<asset>.json
     FString GetExportPath(const FString& AssetPath);
+
+    // True when a stamped export for AssetPath was written at or after Since. The stamp is not known
+    // up front, so presence is judged by "this run wrote one", never by the plain path.
+    bool HasStampedExportSince(const FString& AssetPath, const FDateTime& Since);
+
+    // The file name carries the asset's revision and the moment of capture, so two exports never collide
+    // and a reader knows which revision a file describes without opening it. Stamping happens after the
+    // write succeeds, so a failed export burns no timestamp. GetPath is the plain path until then.
+    class FExportTarget
+    {
+    public:
+        explicit FExportTarget(const FString& InAssetPath);
+
+        bool Save(const TSharedRef<FJsonObject>& JsonObject);
+
+        const FString& GetPath() const { return m_Path; }
+
+    private:
+        FString m_AssetPath;
+        FString m_Path;
+    };
 
     // Serialize JsonObject to FilePath as UTF-8 (no BOM). Creates output dir if missing.
     bool SaveJsonToFile(const TSharedRef<FJsonObject>& JsonObject, const FString& FilePath);

@@ -5,15 +5,9 @@
 
 #include "DataAssetExportCommandlet.generated.h"
 
-/*
- * Exports DataAsset properties to JSON via UObject reflection.
- *
- * Usage:
- *   UnrealEditor-Cmd.exe Project.uproject -run=DataAssetExport -assets="/Game/Path/DA_A,/Game/Path/DA_B"
- *
- * Output:
- *   <ProjectDir>/Intermediate/UAssetExport/<AssetPath>.json
- */
+// Exports DataAsset properties to JSON via UObject reflection.
+//   UnrealEditor-Cmd.exe Project.uproject -run=DataAssetExport -assets="/Game/Path/DA_A,/Game/Path/DA_B"
+// Contract: Docs/Export.md
 UCLASS()
 class UDataAssetExportCommandlet : public UCommandlet
 {

@@ -22,9 +22,8 @@
 
 namespace
 {
-    // Export writes these for readability. Slots is a live object list rebuilt by AddChild, SlotClass
-    // is export-only metadata, feeding either back through ImportText corrupts the tree. Delegate
-    // bindings export as an unparseable placeholder and carry nothing worth restoring.
+    // Slots is a live object list rebuilt by AddChild and SlotClass is export-only, feeding either back
+    // through ImportText corrupts the tree. Delegate bindings export as an unparseable placeholder.
     bool IsExportOnlyField(const FString& FieldName, const FString& Value)
     {
         if (FieldName == TEXT("Slots") || FieldName == TEXT("SlotClass"))

@@ -73,8 +73,8 @@ int32 USanitizeLevelReferenceCommandlet::Main(const FString& Params)
 
         UE_LOG(LogUAssetWorkbenchMigrator, Display, TEXT("SanitizeLevelReference: %s -> replaced=%d saved=%s reason=%s"), *LevelPath, Result.ReferencesReplaced, Result.bSaved ? TEXT("true") : TEXT("false"), *Result.FailReason);
 
-        // GC between levels so package memory is reclaimed; replacement assets are
-        // rooted in ResolvePairs so they survive.
+        // GC between levels so package memory is reclaimed. Replacement assets are rooted in ResolvePairs
+        // so they survive.
         CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
     }
 

@@ -59,10 +59,10 @@ int32 UBehaviorTreeExportCommandlet::Main(const FString& Params)
             continue;
         }
 
-        FString OutputPath = UAssetWorkbench::GetExportPath(AssetPath);
-        if (UAssetWorkbench::SaveJsonToFile(JsonObject.ToSharedRef(), OutputPath))
+        UAssetWorkbench::FExportTarget ExportTarget(AssetPath);
+        if (ExportTarget.Save(JsonObject.ToSharedRef()))
         {
-            UE_LOG(LogUAssetWorkbenchExporter, Display, TEXT("Exported: %s -> %s"), *AssetPath, *OutputPath);
+            UE_LOG(LogUAssetWorkbenchExporter, Display, TEXT("Exported: %s -> %s"), *AssetPath, *ExportTarget.GetPath());
             ExportedCount++;
         }
     }

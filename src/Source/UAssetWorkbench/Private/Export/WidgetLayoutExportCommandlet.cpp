@@ -1,4 +1,5 @@
 #include "Export/WidgetLayoutExportCommandlet.h"
+#include "Export/EdGraphJsonSerializer.h"
 #include "UAssetWorkbenchModule.h"
 #include "UAssetWorkbenchUtil.h"
 #include "UAssetWorkbenchVersion.h"
@@ -11,12 +12,6 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "EdGraph/EdGraph.h"
-#include "EdGraph/EdGraphNode.h"
-#include "EdGraph/EdGraphPin.h"
-#include "K2Node.h"
-#include "K2Node_CallFunction.h"
-#include "K2Node_DynamicCast.h"
-#include "K2Node_Event.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Channels/MovieSceneChannelEditorData.h"
@@ -129,10 +124,10 @@ int32 UWidgetLayoutExportCommandlet::Main(const FString& Params)
             continue;
         }
 
-        FString OutputPath = UAssetWorkbench::GetExportPath(AssetPath);
-        if (UAssetWorkbench::SaveJsonToFile(JsonObject.ToSharedRef(), OutputPath))
+        UAssetWorkbench::FExportTarget ExportTarget(AssetPath);
+        if (ExportTarget.Save(JsonObject.ToSharedRef()))
         {
-            UE_LOG(LogUAssetWorkbenchExporter, Display, TEXT("Exported: %s -> %s"), *AssetPath, *OutputPath);
+            UE_LOG(LogUAssetWorkbenchExporter, Display, TEXT("Exported: %s -> %s"), *AssetPath, *ExportTarget.GetPath());
             ExportedCount++;
         }
     }
@@ -178,24 +173,26 @@ TSharedPtr<FJsonObject> UWidgetLayoutExportCommandlet::ExportWidgetBlueprint(UWi
     Root->SetArrayField(TEXT("Animations"), AnimationsArray);
 
     // EdGraph (EventGraphs + FunctionGraphs)
+    FEdGraphJsonOptions GraphOptions;
+    GraphOptions.bRecurseSubGraphs = true;
+    FEdGraphJsonSerializer Serializer(GraphOptions);
+
     TArray<TSharedPtr<FJsonValue>> GraphsArray;
 
     for (UEdGraph* Graph : WidgetBP->UbergraphPages)
     {
-        TSharedPtr<FJsonObject> GraphObj = ExportGraph(Graph);
+        TSharedPtr<FJsonObject> GraphObj = Serializer.ExportGraph(Graph, TEXT("EventGraph"));
         if (GraphObj.IsValid())
         {
-            GraphObj->SetStringField(TEXT("GraphType"), TEXT("EventGraph"));
             GraphsArray.Add(MakeShared<FJsonValueObject>(GraphObj));
         }
     }
 
     for (UEdGraph* Graph : WidgetBP->FunctionGraphs)
     {
-        TSharedPtr<FJsonObject> GraphObj = ExportGraph(Graph);
+        TSharedPtr<FJsonObject> GraphObj = Serializer.ExportGraph(Graph, TEXT("Function"));
         if (GraphObj.IsValid())
         {
-            GraphObj->SetStringField(TEXT("GraphType"), TEXT("Function"));
             GraphsArray.Add(MakeShared<FJsonValueObject>(GraphObj));
         }
     }
@@ -413,153 +410,5 @@ TSharedPtr<FJsonObject> UWidgetLayoutExportCommandlet::ExportAnimation(UWidgetAn
     AnimObj->SetArrayField(TEXT("Tracks"), TracksArray);
 
     return AnimObj;
-}
-
-// EdGraph
-
-TSharedPtr<FJsonObject> UWidgetLayoutExportCommandlet::ExportGraph(const UEdGraph* Graph) const
-{
-    if (!Graph)
-    {
-        return nullptr;
-    }
-
-    TSharedPtr<FJsonObject> GraphObj = MakeShared<FJsonObject>();
-    GraphObj->SetStringField(TEXT("Name"), Graph->GetName());
-
-    TArray<TSharedPtr<FJsonValue>> NodesArray;
-    for (const UEdGraphNode* Node : Graph->Nodes)
-    {
-        TSharedPtr<FJsonObject> NodeObj = ExportNode(Node);
-        if (NodeObj.IsValid())
-        {
-            NodesArray.Add(MakeShared<FJsonValueObject>(NodeObj));
-        }
-    }
-    GraphObj->SetArrayField(TEXT("Nodes"), NodesArray);
-
-    return GraphObj;
-}
-
-TSharedPtr<FJsonObject> UWidgetLayoutExportCommandlet::ExportNode(const UEdGraphNode* Node) const
-{
-    if (!Node)
-    {
-        return nullptr;
-    }
-
-    TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
-
-    NodeObj->SetStringField(TEXT("NodeId"), Node->NodeGuid.ToString());
-    NodeObj->SetStringField(TEXT("Class"), Node->GetClass()->GetName());
-    NodeObj->SetStringField(TEXT("Title"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
-
-    if (!Node->NodeComment.IsEmpty())
-    {
-        NodeObj->SetStringField(TEXT("Comment"), Node->NodeComment);
-    }
-
-    if (const UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(Node))
-    {
-        FName FunctionName = CallNode->FunctionReference.GetMemberName();
-        if (!FunctionName.IsNone())
-        {
-            NodeObj->SetStringField(TEXT("FunctionName"), FunctionName.ToString());
-        }
-
-        UClass* MemberParent = CallNode->FunctionReference.GetMemberParentClass();
-        if (MemberParent)
-        {
-            NodeObj->SetStringField(TEXT("FunctionOwner"), MemberParent->GetName());
-        }
-    }
-
-    if (const UK2Node_DynamicCast* CastNode = Cast<UK2Node_DynamicCast>(Node))
-    {
-        if (CastNode->TargetType)
-        {
-            NodeObj->SetStringField(TEXT("CastTarget"), CastNode->TargetType->GetPathName());
-        }
-    }
-
-    if (const UK2Node_Event* EventNode = Cast<UK2Node_Event>(Node))
-    {
-        FName EventName = EventNode->EventReference.GetMemberName();
-        if (!EventName.IsNone())
-        {
-            NodeObj->SetStringField(TEXT("EventName"), EventName.ToString());
-        }
-    }
-
-    TArray<TSharedPtr<FJsonValue>> PinsArray;
-    for (const UEdGraphPin* Pin : Node->Pins)
-    {
-        if (Pin->bHidden)
-        {
-            continue;
-        }
-
-        TSharedPtr<FJsonObject> PinObj = ExportPin(Pin);
-        if (PinObj.IsValid())
-        {
-            PinsArray.Add(MakeShared<FJsonValueObject>(PinObj));
-        }
-    }
-    NodeObj->SetArrayField(TEXT("Pins"), PinsArray);
-
-    return NodeObj;
-}
-
-TSharedPtr<FJsonObject> UWidgetLayoutExportCommandlet::ExportPin(const UEdGraphPin* Pin) const
-{
-    if (!Pin)
-    {
-        return nullptr;
-    }
-
-    TSharedPtr<FJsonObject> PinObj = MakeShared<FJsonObject>();
-
-    PinObj->SetStringField(TEXT("Name"), Pin->PinName.ToString());
-    PinObj->SetStringField(TEXT("Direction"), Pin->Direction == EGPD_Input ? TEXT("Input") : TEXT("Output"));
-    PinObj->SetStringField(TEXT("Type"), Pin->PinType.PinCategory.ToString());
-
-    if (Pin->PinType.PinSubCategoryObject.IsValid())
-    {
-        PinObj->SetStringField(TEXT("SubType"), Pin->PinType.PinSubCategoryObject->GetName());
-    }
-
-    if (!Pin->DefaultValue.IsEmpty())
-    {
-        PinObj->SetStringField(TEXT("Default"), Pin->DefaultValue);
-    }
-
-    if (!Pin->DefaultTextValue.IsEmpty())
-    {
-        PinObj->SetStringField(TEXT("DefaultText"), Pin->DefaultTextValue.ToString());
-    }
-
-    if (Pin->DefaultObject)
-    {
-        PinObj->SetStringField(TEXT("DefaultObject"), Pin->DefaultObject->GetPathName());
-    }
-
-    if (Pin->LinkedTo.Num() > 0)
-    {
-        TArray<TSharedPtr<FJsonValue>> LinksArray;
-        for (const UEdGraphPin* LinkedPin : Pin->LinkedTo)
-        {
-            if (LinkedPin && LinkedPin->GetOwningNode())
-            {
-                TSharedPtr<FJsonObject> LinkObj = MakeShared<FJsonObject>();
-                LinkObj->SetStringField(TEXT("NodeId"), LinkedPin->GetOwningNode()->NodeGuid.ToString());
-                LinkObj->SetStringField(TEXT("NodeTitle"), LinkedPin->GetOwningNode()->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
-                LinkObj->SetStringField(TEXT("PinName"), LinkedPin->PinName.ToString());
-                LinksArray.Add(MakeShared<FJsonValueObject>(LinkObj));
-            }
-        }
-        PinObj->SetArrayField(TEXT("LinkedTo"), LinksArray);
-    }
-
-    return PinObj;
 }
 

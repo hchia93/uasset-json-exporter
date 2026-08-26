@@ -14,9 +14,9 @@
 | --- | --- |
 | 读不了 | 逻辑与配置锁在二进制 `.uasset` 里，AI 拿到文件也无从下手。上百节点的 EventGraph 没有可读的文本形态，蓝图里的废弃变量、断掉的连线、错误的默认值靠肉眼在编辑器里审不完。Montage 的 notify 时间点、UMG 的层级与关键帧、Niagara 与材质参数、DataTable 数值、level 的 actor 摆放与 streaming 配置，全都只在编辑器界面里存在 |
 | 改不了 | 要改 UMG 布局只能在编辑器里手工拖，没有可版本控制、可重放的写入路径 |
-| 改不动既有的 | 给蓝图加个组件、在图里接上线、再设个默认值，是三次分开的手工编辑，一批蓝图就要重复一批次 |
+| 改不动既有的 | 给蓝图加个组件、在图里接上线、再设个默认值，是三次分开的手工编辑，一批蓝图就要重复一批次。动画状态机是同一件事再上一层，state、conduit、transition 与它们的规则图全是鼠标活 |
 | 改名后修不了 | C++ 或资产改名后，CoreRedirects 只能修调用侧，修不了 Blueprint 图里的实现侧与消费侧，也修不了别的 level 对旧路径的 import |
-| 审计不了 | 破损引用、level 的 streaming 拓扑、每个 level 的组件预算，没有批量查询的入口 |
+| 审计不了 | 破损引用、level 的 streaming 拓扑、每个 level 的组件预算、贴图的压缩与 sRGB 设置、材质的 usage flag 与 Nanite 兼容，都没有批量查询的入口 |
 
 五类问题对应五组能力。
 
@@ -26,9 +26,9 @@
 | --- | --- | --- | --- |
 | Export | 读 uasset 结构导出 JSON | `Intermediate/UAssetExport` 下的 JSON | 11 |
 | Import | 读 JSON spec 写回或创建 uasset | 被修改或新建的 uasset | 3 |
-| Edit | 按意图修改既有 uasset | 被修改的 uasset | 2 |
-| Migrate | C++ 或资产改名后修复引用 | 被修改的 uasset | 6 |
-| Audit | 只读检查产出报告 | 报告 JSON | 2 |
+| Edit | 按意图修改既有 uasset | 被修改的 uasset | 4 |
+| Migrate | C++ 或资产改名后修复引用 | 被修改的 uasset | 7 |
+| Audit | 只读检查产出报告 | 报告 JSON | 4 |
 
 组别由 run 名决定: 后缀 `Export` 是 Export 组，后缀 `Import` 与前缀 `Create` 是 Import 组，前缀 `Edit` 是 Edit 组，前缀 `Audit` 是 Audit 组，其余是 Migrate 组。命名上 `Import` 与 `Export` 是名词做后缀，其余动词在前。
 
@@ -38,12 +38,27 @@
 
 | 编辑器状态 | 走哪条路 | 反馈 |
 | --- | --- | --- |
-| 开着 | 写 pending task，编辑器内的 subsystem 进程内执行 | Export 弹右下角 toast，其余进 Message Log |
+| 开着 | 写 pending task，编辑器内的 subsystem 进程内执行 | 每个 run 在 Message Log 开一页，该 run 有 warning 或 error 才弹 toast |
 | 关着 | 起 `UnrealEditor-Cmd` 跑 commandlet | log |
 
 两条路产出一致，调用方不需要关心编辑器开没开。
 
-这套路由的意义: 四组能力共享同一个调用入口和同一套产出约定，工作流可以按组合拼装，导出结构，离线分析，写回资产，审计验证，而不是每加一个工具就多一种调用方式。加一个 commandlet 就是加一个能力，契约不变。
+这套路由的意义: 五组能力共享同一个调用入口和同一套产出约定，工作流可以按组合拼装，导出结构，离线分析，写回资产，审计验证，而不是每加一个工具就多一种调用方式。加一个 commandlet 就是加一个能力，契约不变。
+
+## 调用契约
+
+每个 commandlet 只返回四个码，出自同一个枚举，编辑器内的 queue 通道原样透传。
+
+| 码 | 含义 |
+| --- | --- |
+| 0 | 成功 |
+| 1 | 失败，参数错、资产 load 不到、值写不进去 |
+| 2 | 编辑器在运行，commandlet 那条路主动让开而不是与它抢 |
+| 3 | 运行本身成功，报告里有要处理的东西，Audit 组专用 |
+
+3 不是失败，正是这一点让 audit 能当提交 gate 用。
+
+写入按 target 全有或全无。任一 writer 失败，整个 target 在落盘前中止；编译不过的 Blueprint 永不保存。插件建出来的节点都带 `RF_Transactional`，改过的资产在编辑器里打开不会弹「需要重存」的提示。
 
 ## 快速开始
 
@@ -58,7 +73,7 @@ run_commandlet.sh <UE_PATH> <UPROJECT> <RunName> <AssetList> [IDLE_SEC] [MAX_SEC
 | `UE_PATH` | 引擎安装根目录 |
 | `UPROJECT` | `.uproject` 的绝对路径 |
 | `RunName` | commandlet 的 run 名 |
-| `AssetList` | 逗号分隔的资产路径，Audit 组不吃它，传空串 |
+| `AssetList` | 逗号分隔的资产路径，spec 驱动的 run 传空串 |
 | `IDLE_SEC` | Export 组判定完成用的输出 mtime 静默秒数，默认 10 |
 | `MAX_SEC` | 总等待上限，默认 600 |
 | `EXTRA_ARGS` | 透传给 commandlet 的参数 |
@@ -105,7 +120,7 @@ Audit。
 ```bash
 MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
     "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject" \
-    AuditLevelReference "" 10 600 \
+    AuditTexture "" 10 600 \
     '-scandir="/Game"'
 ```
 
@@ -116,8 +131,8 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
 
 | RunName | 导出内容 |
 | --- | --- |
-| `BlueprintEdGraphExport` | Blueprint 图、节点、pin、连线、变量、组件、引用资产 |
-| `AnimMontageExport` | Montage section、slot、ANS/AN 位置与时长、notify 自定义参数 |
+| `BlueprintEdGraphExport` | Blueprint 图、节点、pin、连线、函数签名、变量、事件分发器、timeline、组件、引用资产 |
+| `AnimAssetExport` | AnimSequence 与 AnimMontage 的 notify、曲线、轨道名、root motion，sequence 另有 sync marker，montage 另有 section 与 slot |
 | `WidgetLayoutExport` | Widget 树、slot 布局属性、子类属性、动画关键帧、EdGraph |
 | `DataAssetExport` | DataAsset 子类的全部自定义属性，数组元素展开 |
 | `DataTableExport` | DataTable 行结构名与全部行数据，按 RowName 索引 |
@@ -125,19 +140,32 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
 | `MaterialExport` | Material 表达式连线链与全局设置，MaterialInstance 的参数覆写 |
 | `TextureExport` | Texture 属性，压缩、sRGB、LOD group、mip、源尺寸 |
 | `BehaviorTreeExport` | BT 树结构、节点参数、Blackboard key |
-| `AnimBlueprintExport` | AnimBP EdGraph、状态机的状态、转换、条件、blend 设置 |
+| `AnimBlueprintExport` | AnimBP EdGraph、状态机的状态、转换、blend 设置、入口状态、事件绑定 |
 | `LevelExport` | Level 的 actor / component、与 archetype 的差异属性、碰撞与静态网格与 ISM 摘要、streaming level |
 
-输出: `Intermediate/UAssetExport/<AssetPath>.json`，不入版本控制。
+输出: `Intermediate/UAssetExport/<AssetPath>_r<revision>_<YYYYMMDD-HHMMSS>.json`，不入版本控制。
+
+`revision` 是该资产在版本控制里的 last-changed revision。戳过的文件名在导出成功之后才落，所以同一资产的多次导出互不覆盖，过期的导出也不会被当成新鲜的，读最新那份。
 
 每份 JSON 都带 `ExporterVersion` 与 `ExportType` 两个通用字段，其余按资产类型展开。
+
+`BlueprintEdGraphExport`、`AnimBlueprintExport`、`WidgetLayoutExport` 共用一份 EdGraph 序列化器，图、节点、pin 三层的键在三份产物里完全相同，同一张图经两个 commandlet 导出可以直接 diff。
+
+| 新增 | 给读者的东西 |
+| --- | --- |
+| 每张函数类图的 `Signature` | 入参、返回值、局部变量、access、flag，形态就是 `EditBlueprint` 能直接吃回去的 spec |
+| 变量元数据、`EventDispatchers[]`、`Timelines[]` | 蓝图里住在图之外的那部分 |
+| anim 节点的 `Settings` / `Bindings` / `ExposedPins` | Details 面板里的东西，不只是 pin 上的 |
+| 每条 transition 的 `RuleSummary` | 一行说清这条靠什么进入，读状态机不必展开每张规则图 |
+| AnimAsset 的曲线、sync marker、轨道名、root motion、montage blend | 过去只在编辑器时间轴里存在的时序数据 |
+| 贴图与材质的属性块 | Edit 组与 Audit 组要动的那些构建设置 |
 
 <details>
 <summary>Blueprint EdGraph</summary>
 
 ```json
 {
-    "ExporterVersion": "2.0.0",
+    "ExporterVersion": "2.4.0",
     "ExportType": "BlueprintEdGraph",
     "Blueprint": "BP_Foo",
     "ParentClass": "PlayerController",
@@ -149,6 +177,7 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
             "GraphType": "EventGraph",
             "Nodes": [
                 {
+                    "NodeId": "630182DA4D53F4141AD5B792F2AA8565",
                     "Class": "K2Node_CallFunction",
                     "Title": "Open Level (by Object Reference)",
                     "FunctionName": "OpenLevelBySoftObjectPtr",
@@ -162,13 +191,13 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
 </details>
 
 <details>
-<summary>AnimMontage</summary>
+<summary>AnimAsset</summary>
 
 ```json
 {
-    "ExporterVersion": "2.0.0",
+    "ExporterVersion": "2.4.0",
     "ExportType": "AnimMontage",
-    "MontageName": "AM_Foo_Attack_01",
+    "AssetName": "AM_Foo_Attack_01",
     "SequenceLength": 0.543,
     "Sections": [
         { "Name": "Default", "StartTime": 0 }
@@ -181,11 +210,20 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
             ]
         }
     ],
+    "Curves": [
+        {
+            "Name": "Windup",
+            "Flags": [ "Editable" ],
+            "KeyCount": 2,
+            "Keys": [ { "Time": 0.0, "Value": 0.0 }, { "Time": 0.5, "Value": 1.0 } ]
+        }
+    ],
     "Notifies": [
         {
             "NotifyName": "ANS_Example",
             "TriggerTime": 0.0001,
             "Duration": 0.122,
+            "TrackIndex": 0,
             "IsState": true,
             "NotifyClass": "AnimNotifyState_Example",
             "Parameters": {
@@ -196,6 +234,49 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
     ]
 }
 ```
+
+`Parameters` 改完直接喂回 `EditAnimAsset`。
+</details>
+
+<details>
+<summary>AnimBlueprint 状态机</summary>
+
+```json
+{
+    "ExporterVersion": "2.4.0",
+    "ExportType": "AnimBlueprint",
+    "StateMachines": [
+        {
+            "StateMachineName": "Locomotion",
+            "EntryState": "Idle",
+            "States": [
+                {
+                    "StateName": "Idle",
+                    "StateType": "AST_SingleState",
+                    "Events": { "UpdateFunction": "TickIdle" }
+                },
+                { "StateName": "Airborne", "StateType": "Conduit" }
+            ],
+            "Transitions": [
+                {
+                    "FromState": "Idle",
+                    "ToState": "Walk",
+                    "CrossfadeDuration": 0.2,
+                    "LogicType": "TLT_Inertialization",
+                    "RuleSummary": {
+                        "Getter": "GetRelevantAnimTimeRemainingFraction",
+                        "State": "Idle",
+                        "Compare": "Less",
+                        "Threshold": "0.1"
+                    }
+                }
+            ]
+        }
+    ]
+}
+```
+
+transition 的键就是 `EditBlueprint` 在 `StateMachines` 下读的那套，导出的一条 transition 原样贴回就是 spec。
 </details>
 
 <details>
@@ -203,7 +284,7 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
 
 ```json
 {
-    "ExporterVersion": "2.0.0",
+    "ExporterVersion": "2.4.0",
     "ExportType": "WidgetLayout",
     "WidgetBlueprint": "WBP_Foo",
     "WidgetTree": {
@@ -235,7 +316,7 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
 
 ```json
 {
-    "ExporterVersion": "2.0.0",
+    "ExporterVersion": "2.4.0",
     "ExportType": "DataTable",
     "DataTableName": "DT_Foo",
     "RowStruct": "AttributeMetaData",
@@ -262,13 +343,15 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
 
 ```json
 {
-    "ExporterVersion": "2.0.0",
+    "ExporterVersion": "2.4.0",
     "ExportType": "Material",
     "MaterialName": "M_Foo",
     "ShadingModel": "MSM_DefaultLit",
     "BlendMode": "BLEND_Translucent",
     "TwoSided": false,
     "MaterialDomain": "MD_Surface",
+    "bAutomaticallySetUsageInEditor": true,
+    "UsageFlags": [ "bUsedWithSkeletalMesh", "bUsedWithNanite" ],
     "Expressions": [
         {
             "Class": "MaterialExpressionMaterialFunctionCall",
@@ -312,7 +395,7 @@ MaterialInstance 导出参数覆写表。
 
 ```json
 {
-    "ExporterVersion": "2.0.0",
+    "ExporterVersion": "2.4.0",
     "ExportType": "Level",
     "LevelName": "L_Foo",
     "WorldSettings": {
@@ -362,7 +445,7 @@ ISM / HISM / Foliage 组件的实例数超过 200 时只导出数量、包围盒
 
 ```json
 {
-    "ExporterVersion": "2.0.0",
+    "ExporterVersion": "2.4.0",
     "ExportType": "NiagaraSystem",
     "SystemName": "NS_Foo",
     "ExposedParameters": [],
@@ -526,41 +609,78 @@ spec 顶层字段。
 </details>
 
 <details>
-<summary><b>Edit</b>，2 个 commandlet</summary>
+<summary><b>Edit</b>，4 个 commandlet</summary>
 
-Import 是照 spec 重新生成一份资产，Edit 是改动既有的那一份，一个面配一个 writer。`EditBlueprint` 的划分对齐编辑器自己的 Blueprint diff 把蓝图拆成的几个面，`EditAnimMontage` 管 montage 的 notify。
+Import 是照 spec 重新生成一份资产，Edit 是改动既有的那一份，一个面配一个 writer。这里是插件做得最多的地方，也是 agent 能交回一个改动而不是一段说明的地方。
+
+| RunName | 改什么 | 默认行为 |
+| --- | --- | --- |
+| `EditBlueprint` | 组件、变量、默认值、函数、分发器、接口、状态机、图、排版 | dry run |
+| `EditAnimAsset` | AnimSequence 与 AnimMontage 的 notify 与曲线，sequence 另有 sync marker，montage 另有 section 与 slot | dry run |
+| `EditTextureAsset` | Texture2D 的构建设置 | dry run |
+| `EditMaterialAsset` | Material 的 usage flag 与基本设定，MaterialInstanceConstant 的 parent 与参数覆写 | dry run |
+
+dry run 不是预览。不给 `-apply` 时每个 writer 照样对真实资产跑一遍，只跳过保存，所以 dry run 干净就是 spec 真的校验过了。改动随进程退出丢弃。
+
+**EditBlueprint**
+
+九个 writer，划分对齐编辑器自己的 Blueprint diff 把蓝图拆成的那几个面。
 
 | Spec key | 对应 diff mode | 写什么 |
 | --- | --- | --- |
 | `Components` | `ComponentsMode` | SimpleConstructionScript 组件树 |
-| `Variables` | `MyBlueprintMode` | 成员变量 |
-| `Defaults` | `DefaultsMode` | CDO 与组件模板的属性值 |
-| `Graph` | `GraphMode` | 节点、pin 默认值、连线 |
+| `Variables` | `MyBlueprintMode` | 成员变量，`Modify` 能给既有变量重定类型 |
+| `Defaults` | `DefaultsMode` | CDO 与组件模板的属性值，覆盖父 BP 继承来的组件 |
+| `Functions` | `MyBlueprintMode` | 函数图、签名、局部变量、access 与 flag |
+| `Dispatchers` | `MyBlueprintMode` | 事件分发器与其签名图 |
+| `Interfaces` | `ClassSettingsMode` | 实现的接口 |
+| `StateMachines` | `GraphMode` | 状态机、state、conduit、alias、transition |
+| `Graph` | `GraphMode` | 节点、节点属性、绑定、暴露 pin、pin 默认值、连线 |
 | `Layout` | 无，纯外观 | 节点位置 |
 
-| RunName | 做什么 | 默认行为 |
-| --- | --- | --- |
-| `EditBlueprint` | 把 spec 点名的每个面应用到一个 Blueprint 上 | dry run |
-| `EditAnimMontage` | 按 spec 增删改一个 AnimMontage 上的 notify | dry run |
-
-一个 target 只 load 一次资产，跑完 spec 点名的所有 writer，编译保存一次。任一 writer 失败整个 target 在落盘前中止，蓝图不会停在改了一半的状态。
-
-writer 的执行顺序固定，与 spec 里 key 的顺序无关，因为后一个依赖前一个。
+一个 target 只 load 一次资产，跑完 spec 点名的所有 writer，编译保存一次。writer 的执行顺序固定，与 spec 里 key 的顺序无关，因为后一个依赖前一个。
 
 ```
-Components -> Variables -> Defaults -> Graph -> Layout
+Components -> Variables -> Defaults -> Functions -> Dispatchers -> Interfaces -> StateMachines -> Graph -> Layout
 ```
 
-`Graph` 能引用同一次运行里前面 writer 新建的组件和变量，`Layout` 能用 `Graph` 给节点的 Id 寻址。这条依赖就是五个面合成一个 commandlet 而不是拆成五个的原因。
+`Graph` 能引用同一次运行里前面 writer 新建的组件、变量与函数入口，`Layout` 能用 `Graph` 给节点的 Id 寻址。这条依赖就是九个面合成一个 commandlet 而不是拆成九个的原因。
 
-节点用 Id 寻址。spec 新建的节点用 spec 给的 Id，已存在的节点用 `BlueprintEdGraphExport -graphs` 打印的 32 位 NodeId，两者同一命名空间，所以新节点能直接接到旧节点上。连线走 `UEdGraphSchema_K2::TryCreateConnection`，与在编辑器里拖线同一条路，会校验并在需要时插入转换节点。
+| 面 | 能到哪 |
+| --- | --- |
+| `Graph` 节点 | 25 种节点类型，从 `CallFunction`、`Branch` 到 `DynamicCast`、`MakeStruct` / `BreakStruct`、四种 `Switch`、`SpawnActor`、`Timeline`、`MathExpression` 与 `AnimGetter`。`Type` 以 `/` 开头当类路径解析，anim graph 节点走这条。表外的 `Type` 去 StandardMacros 里按图名查，所以 `Gate` 与 `DoOnce` 直接写就行 |
+| `Graph` 的 `Bind` | anim 节点的 property access 绑定，就是 Details 面板那个 Bind 下拉框。指向一条 transition 的 Id 就绑到它的 result 上 |
+| `Graph` 的 `ExposePins` | 露出或收起 anim 节点某个属性的 pin，按属性名寻址而不是数组下标 |
+| `StateMachines` | 十个 op，`Add` / `AddState` / `AddConduit` / `AddAlias` / `AddTransition` / `ModifyState` / `ModifyTransition` / `RenameState` / `RemoveState` / `RemoveTransition`。键名与 `AnimBlueprintExport` 打印的一致，导出的 state 或 transition 原样贴回就是 spec |
+| `Functions` | `Add` / `Rename` / `Modify` / `Remove`，`Signature` 块带入参、返回值、局部变量、纯函数、access 与分类，形态就是导出打印的那个 |
+| `Layout` | `Arrange` 按图自己的拓扑铺，认三种图，K2 的 exec 链、pose 图、状态机。`Straighten` 就是编辑器里的 Q |
 
-`Layout` 带 `Arrange`，按图的拓扑铺开，spec 里一行坐标都不用写；也带 `Straighten`，就是编辑器里的 Q。headless 下 Slate 没量过任何东西，所以节点尺寸是从标题行数与 pin 行数估出来的，不是从 widget 上读的。
+节点用 Id 寻址。spec 新建的节点用 spec 给的 Id，已存在的节点用 `BlueprintEdGraphExport -graphs` 打印的 32 位 NodeId，两者同一命名空间，所以新节点能直接接到旧节点上。寻址递归穿透子图，state 内部 pose 图里的节点不必先切到那一层就能点名。连线走 `UEdGraphSchema_K2::TryCreateConnection`，与在编辑器里拖线同一条路，会校验并在需要时插入转换节点。
+
+headless 下 Slate 没量过任何东西，所以 `Layout` 的节点尺寸是从标题行数与 pin 行数估出来的，不是从 widget 上读的，并且按 widget 家族分开估，state 与 conduit、anim 节点、注释框各一套。
+
+**EditAnimAsset**
+
+| Spec key | 写什么 |
+| --- | --- |
+| `Notifies` | AnimNotify 与 AnimNotifyState 的增删改，含轨道摆放与反射出的参数 |
+| `Curves` | float 曲线的增删改名与关键帧写入，走 animation data model controller |
+| `SyncMarkers` | AuthoredSyncMarkers，仅 AnimSequence |
+| `Sections` | montage 段落与 `NextSection` 链，仅 AnimMontage |
+| `Slots` | montage 的 slot 与 segment，仅 AnimMontage |
+
+顺序固定为 `Slots` -> `Sections` -> `Curves` -> `SyncMarkers` -> `Notifies`，因为 slot 决定 montage 长度，后面每个时间字段都按这个长度校验。
+
+**EditTextureAsset 与 EditMaterialAsset**
+
+两个都原样吃各自 audit 产出的 `Spec` 块，所以 `AuditTexture` 接 `EditTextureAsset`、`AuditMaterial` 接 `EditMaterialAsset` 是一对查完就修的组合，中间没有翻译步骤。
+
+`EditTextureAsset` 写 17 项构建设置，LOD group、压缩、sRGB、mip 生成、尺寸上限、streaming、虚拟纹理、过滤与寻址。`EditMaterialAsset` 在基材质上写全部 23 个 usage flag 加 BlendMode、domain、ShadingModel、双面与 opacity mask 裁剪值，在实例上写 parent、标量 / 向量 / 贴图 / static switch 参数与 base property override。材质节点图不在范围内，那是 Python 的 `unreal.MaterialEditingLibrary` 的活。
 
 </details>
 
 <details>
-<summary><b>Migrate</b>，6 个 commandlet</summary>
+<summary><b>Migrate</b>，7 个 commandlet</summary>
 
 CoreRedirects 只覆盖调用侧，Blueprint 图里的实现侧与消费侧不在它的射程内。改名的 interface event 会让 BP override 退化成孤立的 custom event，事件不再触发；改名的 delegate 参数会在绑定节点上留下悬空 pin。两类都编译得过去，靠人眼在大项目里扫不出来。
 
@@ -568,12 +688,13 @@ CoreRedirects 只覆盖调用侧，Blueprint 图里的实现侧与消费侧不�
 | --- | --- | --- |
 | `RedirectBlueprintEvent` | 把退化成 custom event 的 BP override 重新接回新事件，连线一并搬过去，能识别 UE 加的 `_N` 去重后缀 | dry run |
 | `RedirectBlueprintPin` | 把绑定节点的连线从旧输出 pin 移到新 pin，再重建节点丢掉旧 pin，只处理同时带有新旧两个 pin 的节点 | dry run |
+| `DeleteBlueprintNode` | 按 node id 删图节点，图逻辑搬进 C++ 之后的清理步骤。连线是切断不是重接，schema 拒删的节点报出后跳过 | dry run |
 | `ReparentBlueprint` | 改 Blueprint 的父类 | 直接落盘 |
 | `ResaveAsset` | 强制 load、compile、save，让 load 期的 fixup 落盘，之后就能撤掉那条 CoreRedirect，支持 Blueprint 与 map | 直接落盘 |
 | `SanitizeLevelReference` | 把 level 里对旧资产的每一处引用换成新资产，然后 resave 这个 level | 直接落盘，`-dryrun` 只统计 |
 | `DuplicateAsset` | 把资产复制到新路径，副本独立，内部引用不做重定向，目标已存在是错误而不是覆盖 | dry run |
 
-两个 redirect 默认只扫描，逐条列出命中的 Blueprint、事件或节点、以及会搬多少组连线，确认无误再补 `-apply` 编译并保存。扫描一条都没命中时会给 warning，先核对 `-OwnerClass` 与旧名拼写。
+只扫描的那几个逐条列出命中的 Blueprint、事件或节点、以及会搬多少组连线，确认无误再补 `-apply` 编译并保存。扫描一条都没命中时会给 warning，先核对 `-OwnerClass` 与旧名拼写。`DeleteBlueprintNode` 的 node id 从 `BlueprintEdGraphExport -graphs` 的产物里原样抄，没命中的 id 会在结尾报出来，不会静默通过。
 
 `SanitizeLevelReference` 必须在删除旧资产之前跑。换指针需要新旧两边都还在磁盘上，删完再跑就来不及了。
 
@@ -582,16 +703,20 @@ CoreRedirects 只覆盖调用侧，Blueprint 图里的实现侧与消费侧不�
 </details>
 
 <details>
-<summary><b>Audit</b>，2 个 commandlet 与 3 个脚本</summary>
+<summary><b>Audit</b>，4 个 commandlet 与 3 个脚本</summary>
 
 | RunName | 检查什么 |
 | --- | --- |
 | `AuditLevelReference` | level 包里指向已不存在资产的引用 |
 | `AuditLevelTopology` | level 之间的 streaming 关系，谁是 persistent，谁是 sublevel |
+| `AuditTexture` | 贴图的构建设置与它实际被怎么采样是否对得上，规则 T1 到 T15 |
+| `AuditMaterial` | Nanite 兼容与 usage flag 是否对得上实际挂载，规则 N1 到 N9 与 U1 到 U4 |
 
-`AuditLevelReference` 走 Asset Registry 的依赖图逐个判断包是否存在，不 load world，不保存任何包。包是否存在按已挂载的 content root 解析，所以跑之前必须让项目的插件全部启用，否则未挂载 root 下的依赖会被判成假破损。它的配对操作是 Migrate 组的 `SanitizeLevelReference`，audit 找出破损，sanitize 修。
+四个都只读，不保存任何包。退出码 3 表示运行成功且报告里有东西要处理，提交 gate 就看这个。
 
-`AuditLevelTopology` 给每个 level 分角色。
+**AuditLevelReference** 走 Asset Registry 的依赖图逐个判断包是否存在，不 load world。包是否存在按已挂载的 content root 解析，所以跑之前必须让项目的插件全部启用，否则未挂载 root 下的依赖会被判成假破损。它的配对操作是 Migrate 组的 `SanitizeLevelReference`，audit 找出破损，sanitize 修。
+
+**AuditLevelTopology** 给每个 level 分角色。
 
 | 角色 | 判定 |
 | --- | --- |
@@ -600,6 +725,19 @@ CoreRedirects 只覆盖调用侧，Blueprint 图里的实现侧与消费侧不�
 | `Sublevel` | 没有 streaming levels，但被别的 level 引用 |
 
 hosting 优先于被 hosted，一个 level 只要自己挂着 sublevel 就是 `PersistentHost`，哪怕它同时被别的 level 引用。判据是它能不能被独立打开来驱动自己的 sublevel，被复制一份塞进别的 level 里不影响这一点，嵌套关系由 `referenced_by` 照常记录。需要驱动 streaming 的工具靠这份报告找 persistent level，不必再把名字硬编码进脚本。
+
+**AuditTexture** 跑 15 条规则，覆盖压缩、sRGB、LOD group、mip 生成、2 的幂、尺寸预算、streaming 与虚拟纹理。sampler 那几条不自己重写引擎的判断，直接调 `UMaterialExpressionTextureBase::VerifySamplerType`，跟材质编辑器给你看的是同一个结论。用途分类走 Asset Registry 反向图，贴图到材质到材质实例到 mesh / widget / Niagara，最多四跳，分成 UI / Character / Prop / World / VFX 五类，规则因此能说出「这是张 UI 贴图但不在 UI group 里」。两趟压成本，Asset Registry 的 tag 就够判的当场判完，只有必须看像素的才把贴图 load 进来。
+
+**AuditMaterial** 跑 Nanite 规则 N1 到 N9 与 usage flag 规则 U1 到 U4，后者拿每个 `bUsedWith*` 与材质实际挂在什么上对照。每个基材质另外产出 `Cost` 块，domain、BlendMode、接线的输出、引用贴图数、表达式与函数数，以及 `Permutation` 块，usage flag 数乘 quality level 数乘 static switch 组合数。`PIEWarmup` 把这些数字排成「谁会让人在 PIE 里等」的名单，一条都没有时也明说。`-stats` 开二档，headless 逐材质编译代表性 shader 读采样器数、纹理采样数与指令数，一个材质几十秒到几分钟。
+
+两个 audit 都在报告里产出 `Spec` 块，形状就是对应 Edit commandlet 吃的那个。只有建议值确定的规则会进去，BlendMode 这类美术决定只报不改。
+
+```bash
+MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
+    "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject" \
+    EditTextureAsset "" 10 600 \
+    '-spec="C:/temp/texture_spec.json" -apply'
+```
 
 配套脚本三个。
 
@@ -628,7 +766,7 @@ hosting 优先于被 hosted，一个 level 只要自己挂着 sublevel 就是 `P
 2. 拿到行号后按区间读，不要整份读进上下文
 
 ```bash
-grep -n "OnHealthChanged" Intermediate/UAssetExport/Game/Blueprints/BP_Foo.json
+grep -n "OnHealthChanged" Intermediate/UAssetExport/Game/Blueprints/BP_Foo_r*.json
 ```
 
 ## 为什么不依赖官方工具链
@@ -660,12 +798,12 @@ workbench 走 commandlet 加引擎稳定 API，绕开正在演进的那一层。
 
 | 文档 | 内容 |
 | --- | --- |
-| `Docs/AI-Guide.md` | 给 AI agent 的调用手册，决策表加调用模板加常见坑 |
-| `Docs/Export.md` | Export 组明细 |
-| `Docs/Import.md` | Import 组明细与 spec 格式 |
-| `Docs/Edit.md` | Edit 组明细，每个 spec key 与每个 layout op |
-| `Docs/Migrate.md` | Migrate 组明细 |
-| `Docs/Audit.md` | Audit 组明细与 stream metric 工作流 |
+| `Docs/AI-Guide.md` | 给 AI agent 的调用手册，覆盖全部能力的决策表加调用模板加常见坑 |
+| `Docs/Export.md` | Export 组，11 个 commandlet，每个 JSON 字段 |
+| `Docs/Import.md` | Import 组，3 个 commandlet，spec 格式 |
+| `Docs/Edit.md` | Edit 组，4 个 commandlet，每个 spec key 与每个 layout op |
+| `Docs/Migrate.md` | Migrate 组，7 个 commandlet |
+| `Docs/Audit.md` | Audit 组，4 个 commandlet，完整规则表与 stream metric 工作流 |
 
 这些文档是给 agent 读的参考。调用行为与文档描述不符时以源码为准，每个 commandlet header 顶部的块注释写了完整契约。
 
@@ -681,7 +819,7 @@ UE 只是验证场，三样可复用的东西不依赖它。
 
 ## 版本
 
-当前版本: **2.3.2**
+当前版本: **2.4.0**
 
 定义在 `src/Source/UAssetWorkbench/Public/UAssetWorkbenchVersion.h`，同时嵌进每份导出 JSON 的 `ExporterVersion` 字段。
 

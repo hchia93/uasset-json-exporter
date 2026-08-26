@@ -136,6 +136,21 @@ terminate_commandlet() {
     return 0
 }
 
+# Exports are stamped with revision and capture time, so the name is not known up front.
+# Only a file written by this run counts, an older capture must not be mistaken for fresh output.
+newest_export_since() {
+    local prefix="$1" since="$2" f best=""
+    for f in "$prefix"_r*.json; do
+        [ -f "$f" ] || continue
+        if [ "$(get_mtime "$f")" -ge "$since" ]; then
+            best="$f"
+        fi
+    done
+    if [ -n "$best" ]; then
+        echo "$best"
+    fi
+}
+
 route_queue() {
     mkdir -p "$PENDING_DIR" "$DONE_DIR"
 
@@ -196,15 +211,13 @@ route_commandlet() {
         return 2
     fi
 
-    local A REL OUT
-    EXPECTED_FILES=()
+    local A REL
+    EXPECTED_PREFIXES=()
     if [ "$GROUP" = "export" ]; then
         IFS=',' read -r -a ASSET_ARR <<< "$ASSETS"
         for A in "${ASSET_ARR[@]}"; do
             REL="${A#/}"
-            OUT="$EXPORT_ROOT/$REL.json"
-            EXPECTED_FILES+=("$OUT")
-            rm -f "$OUT"
+            EXPECTED_PREFIXES+=("$EXPORT_ROOT/$REL")
         done
     fi
 
@@ -212,8 +225,14 @@ route_commandlet() {
     mkdir -p "$QUEUE_ROOT"
     : > "$CMD_LOG"
 
+    # An empty -assets= makes FParse::Value swallow whatever flag follows it, so omit the flag entirely.
+    local ASSETS_ARG=""
+    if [ -n "$ASSETS" ]; then
+        ASSETS_ARG="-assets=$ASSETS"
+    fi
+
     MSYS_NO_PATHCONV=1 "$UE_CMD" "$UPROJECT" \
-        -run="$RUN" -assets="$ASSETS" $EXTRA_ARGS \
+        -run="$RUN" $ASSETS_ARG $EXTRA_ARGS \
         -nullrhi -nosplash -nosound -unattended -stdout \
         >"$CMD_LOG" 2>&1 &
     local PID=$!
@@ -227,7 +246,7 @@ route_commandlet() {
     local STABLE_SINCE=0
     local LAST_SIG=""
     local KILL_REASON=""
-    local NOW SIG ALL_PRESENT F
+    local NOW SIG ALL_PRESENT F P
     local EXIT_RC=0
 
     while kill -0 "$PID" 2>/dev/null; do
@@ -246,8 +265,9 @@ route_commandlet() {
 
         SIG=""
         ALL_PRESENT=1
-        for F in "${EXPECTED_FILES[@]}"; do
-            if [ ! -f "$F" ]; then
+        for P in "${EXPECTED_PREFIXES[@]}"; do
+            F="$(newest_export_since "$P" "$START_TS")"
+            if [ -z "$F" ]; then
                 ALL_PRESENT=0
                 break
             fi
@@ -289,10 +309,13 @@ route_commandlet() {
 
     local RC=0
     if [ "$GROUP" = "export" ]; then
-        for F in "${EXPECTED_FILES[@]}"; do
-            if [ ! -f "$F" ]; then
-                echo "[run_commandlet] missing output: $F" >&2
+        for P in "${EXPECTED_PREFIXES[@]}"; do
+            F="$(newest_export_since "$P" "$START_TS")"
+            if [ -z "$F" ]; then
+                echo "[run_commandlet] missing output: ${P}_r*.json" >&2
                 RC=1
+            else
+                echo "[run_commandlet] output: $F" >&2
             fi
         done
     else

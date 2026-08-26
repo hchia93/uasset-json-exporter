@@ -254,9 +254,8 @@ void UAssetExportQueueSubsystem::ProcessTaskFile(const FString& PendingPath)
 
     const bool bIsExport = UAssetWorkbench::ResolveGroup(RunName) == UAssetWorkbench::EGroup::Export;
 
-    // Export needs the list to know what to wait for. Every spec-driven run names its targets in the
-    // spec, and demanding a list there only got callers to pass an unrelated path as a placeholder,
-    // which then showed up in the summary as if the run had touched it.
+    // Export needs the list to know what to wait for. A spec-driven run names its targets in the spec,
+    // and demanding a list there only got callers to pass an unrelated path as a placeholder.
     if (bIsExport && Assets.IsEmpty())
     {
         WriteDoneFile(DonePath, 2, {}, TEXT("Export task missing Assets"));
@@ -274,6 +273,9 @@ void UAssetExportQueueSubsystem::ProcessTaskFile(const FString& PendingPath)
 
     // Alive across the dispatch only, so the page holds exactly this run's lines.
     UAssetWorkbench::FRunReport Report(RunName);
+
+    // Taken before dispatch, an export stamped earlier than this belongs to an older run.
+    const FDateTime RunStartUtc = FDateTime::UtcNow();
     const int32 RunExitCode = DispatchRun(RunName, AssetsCsv, ExtraArgs);
 
     // An audit that found something still ran correctly, only Failed and EditorConflict are dispatch failures.
@@ -288,9 +290,8 @@ void UAssetExportQueueSubsystem::ProcessTaskFile(const FString& PendingPath)
     {
         for (const FString& AssetPath : Assets)
         {
-            const FString OutPath = UAssetWorkbench::GetExportPath(AssetPath);
-            Outputs.Add(OutPath);
-            if (IFileManager::Get().FileExists(*OutPath))
+            Outputs.Add(UAssetWorkbench::GetExportPath(AssetPath));
+            if (UAssetWorkbench::HasStampedExportSince(AssetPath, RunStartUtc))
             {
                 ++PresentCount;
             }
@@ -300,8 +301,13 @@ void UAssetExportQueueSubsystem::ProcessTaskFile(const FString& PendingPath)
     const bool bOutputsComplete = !bIsExport || PresentCount == Assets.Num();
     const bool bSuccess = bDispatched && bOutputsComplete;
 
-    // Pass the run's own code through, the caller needs IssuesFound distinguishable from Failed.
-    const int32 ExitCode = bSuccess ? RunExitCode : ToExitCode(EUAssetWorkbenchExitType::Failed);
+    // Run's own code passes through, so EditorConflict stays 2. Missing outputs are the only failure
+    // this layer invents.
+    int32 ExitCode = RunExitCode;
+    if (bDispatched && !bOutputsComplete)
+    {
+        ExitCode = ToExitCode(EUAssetWorkbenchExitType::Failed);
+    }
 
     FString ErrorMessage;
     if (!bDispatched)
@@ -371,10 +377,19 @@ int32 UAssetExportQueueSubsystem::DispatchRun(const FString& RunName, const FStr
         return ToExitCode(EUAssetWorkbenchExitType::Failed);
     }
 
-    FString Params = FString::Printf(TEXT("-assets=\"%s\""), *AssetsCsv);
+    // An empty -assets= makes FParse::Value swallow whatever flag follows it, so omit the flag entirely.
+    FString Params;
+    if (!AssetsCsv.IsEmpty())
+    {
+        Params = FString::Printf(TEXT("-assets=\"%s\""), *AssetsCsv);
+    }
+
     if (!ExtraArgs.IsEmpty())
     {
-        Params += TEXT(" ");
+        if (!Params.IsEmpty())
+        {
+            Params += TEXT(" ");
+        }
         Params += ExtraArgs;
     }
 

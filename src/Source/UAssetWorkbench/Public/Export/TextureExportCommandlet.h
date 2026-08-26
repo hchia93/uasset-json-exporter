@@ -5,15 +5,9 @@
 
 #include "TextureExportCommandlet.generated.h"
 
-/*
- * Exports Texture asset properties to JSON via UObject reflection.
- *
- * Usage:
- *   UnrealEditor-Cmd.exe Project.uproject -run=TextureExport -assets="/Game/Path/T_A,/Game/Path/T_B"
- *
- * Output:
- *   <ProjectDir>/Intermediate/UAssetExport/<AssetPath>.json
- */
+// Exports Texture asset properties to JSON via UObject reflection.
+//   UnrealEditor-Cmd.exe Project.uproject -run=TextureExport -assets="/Game/Path/T_A,/Game/Path/T_B"
+// Contract: Docs/Export.md
 UCLASS()
 class UTextureExportCommandlet : public UCommandlet
 {

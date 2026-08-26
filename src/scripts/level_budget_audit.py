@@ -18,6 +18,21 @@ STATIC_MESH_PATH = re.compile(r"'(/Game/[^']+)'")
 LIGHT_CLASSES = ("PointLight", "SpotLight", "RectLight")
 
 
+EXPORT_STAMP = re.compile(r"_r(?:\d+|NA)_\d{8}-\d{6}$")
+
+
+def latest_exports(pattern):
+    """One capture per asset. Export names carry revision and capture time, so the same asset
+    accumulates many files, only the newest describes what is on disk now."""
+    newest = {}
+    for path in glob.glob(pattern, recursive=True):
+        stem = os.path.splitext(os.path.basename(path))[0]
+        key = (os.path.dirname(path), EXPORT_STAMP.sub("", stem))
+        if key not in newest or os.path.getmtime(path) > os.path.getmtime(newest[key]):
+            newest[key] = path
+    return sorted(newest.values())
+
+
 def default_project_dir():
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
@@ -68,7 +83,7 @@ def main():
     args = parser.parse_args()
 
     pattern = os.path.join(args.project, "Intermediate", "UAssetExport", args.levels)
-    paths = sorted(glob.glob(pattern, recursive=True))
+    paths = latest_exports(pattern)
     if not paths:
         print("no level exports found:", pattern)
         return 1

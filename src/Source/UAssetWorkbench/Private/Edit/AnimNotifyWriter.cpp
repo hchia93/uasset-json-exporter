@@ -1,8 +1,8 @@
-#include "Edit/MontageWriter.h"
+#include "Edit/AnimAssetWriter.h"
 #include "UAssetWorkbenchModule.h"
 #include "UAssetWorkbenchUtil.h"
 
-#include "Animation/AnimMontage.h"
+#include "Animation/AnimSequenceBase.h"
 #include "Animation/AnimNotifies/AnimNotify.h"
 #include "Animation/AnimNotifies/AnimNotifyState.h"
 #include "Dom/JsonObject.h"
@@ -11,9 +11,8 @@
 
 namespace
 {
-    // Trigger times carry an offset of about KINDA_SMALL_NUMBER, so a time copied out of an export
-    // never compares equal to the authored one. A millisecond apart is still the same notify.
-    constexpr float kTimeTolerance = 1.0e-3f;
+    // Handles stay legible on the panel with roughly this much clear time either side of a notify.
+    constexpr float kTrackClearance = 0.05f;
 
     UClass* ResolveNotifyClass(const FString& ClassPath)
     {
@@ -59,26 +58,59 @@ namespace
         return Name;
     }
 
-    // The panel builds its rows from AnimNotifyTracks, so a notify on a track the montage never
-    // declared lands nowhere visible until RefreshCacheData patches the index back to 0.
-    void AddMissingNotifyTracks(UAnimMontage* Montage, int32 TrackIndex)
+    // Track takes a row index, or "auto" to claim the first row nothing else occupies at this time.
+    bool WantsAutoTrack(const TSharedPtr<FJsonObject>& Desc)
+    {
+        FString TrackText;
+        return Desc->TryGetStringField(TEXT("Track"), TrackText) && TrackText.Equals(TEXT("auto"), ESearchCase::IgnoreCase);
+    }
+
+    // First row where no notify sits within kTrackClearance of this one, appending a row when every
+    // existing row is taken. IgnoreIndex keeps a notify being moved from colliding with itself.
+    int32 FindClearNotifyTrack(const UAnimSequenceBase* AnimAsset, float Start, float End, int32 IgnoreIndex)
     {
 #if WITH_EDITORONLY_DATA
-        while (!Montage->AnimNotifyTracks.IsValidIndex(TrackIndex))
-        {
-            const FName TrackName = *FString::FromInt(Montage->AnimNotifyTracks.Num() + 1);
-            Montage->AnimNotifyTracks.Add(FAnimNotifyTrack(TrackName, FLinearColor::White));
-        }
+        const int32 TrackCount = FMath::Max(AnimAsset->AnimNotifyTracks.Num(), 1);
+#else
+        const int32 TrackCount = 1;
 #endif // WITH_EDITORONLY_DATA
+
+        for (int32 TrackIndex = 0; TrackIndex < TrackCount; ++TrackIndex)
+        {
+            bool bTaken = false;
+            for (int32 Index = 0; Index < AnimAsset->Notifies.Num(); ++Index)
+            {
+                const FAnimNotifyEvent& Event = AnimAsset->Notifies[Index];
+                if (Index == IgnoreIndex || Event.TrackIndex != TrackIndex)
+                {
+                    continue;
+                }
+
+                const float EventStart = Event.GetTriggerTime();
+                const float EventEnd = EventStart + Event.GetDuration();
+                if (Start <= EventEnd + kTrackClearance && End + kTrackClearance >= EventStart)
+                {
+                    bTaken = true;
+                    break;
+                }
+            }
+
+            if (!bTaken)
+            {
+                return TrackIndex;
+            }
+        }
+
+        return TrackCount;
     }
 
     // An unresolvable address is the most common spec error, so failures print what was there.
-    FString DescribeNotifies(const UAnimMontage* Montage)
+    FString DescribeNotifies(const UAnimSequenceBase* AnimAsset)
     {
         TArray<FString> Lines;
-        for (int32 Index = 0; Index < Montage->Notifies.Num(); ++Index)
+        for (int32 Index = 0; Index < AnimAsset->Notifies.Num(); ++Index)
         {
-            const FAnimNotifyEvent& Event = Montage->Notifies[Index];
+            const FAnimNotifyEvent& Event = AnimAsset->Notifies[Index];
             Lines.Add(FString::Printf(TEXT("[%d] %s @ %.4f track %d"), Index, *Event.NotifyName.ToString(), Event.GetTriggerTime(), Event.TrackIndex));
         }
 
@@ -95,7 +127,7 @@ namespace
         return Event.Notify;
     }
 
-    class FMontageNotifyWriter : public IMontageWriter
+    class FAnimNotifyWriter : public IAnimAssetWriter
     {
     public:
         virtual const TCHAR* GetSpecKey() const override
@@ -103,7 +135,7 @@ namespace
             return TEXT("Notifies");
         }
 
-        virtual bool Apply(FMontageEditContext& Context, const TSharedPtr<FJsonValue>& Section) override
+        virtual bool Apply(FAnimAssetEditContext& Context, const TSharedPtr<FJsonValue>& Section) override
         {
             const TArray<TSharedPtr<FJsonValue>>* Operations = nullptr;
             if (!Section->TryGetArray(Operations))
@@ -140,7 +172,7 @@ namespace
         }
 
     private:
-        bool ApplyOp(FMontageEditContext& Context, const TSharedPtr<FJsonObject>& Desc, const FString& Op) const
+        bool ApplyOp(FAnimAssetEditContext& Context, const TSharedPtr<FJsonObject>& Desc, const FString& Op) const
         {
             if (Op == TEXT("Add"))
             {
@@ -161,9 +193,9 @@ namespace
             return false;
         }
 
-        bool ResolveTime(const FMontageEditContext& Context, double Time) const
+        bool ResolveTime(const FAnimAssetEditContext& Context, double Time) const
         {
-            const float PlayLength = Context.Montage->GetPlayLength();
+            const float PlayLength = Context.AnimAsset->GetPlayLength();
             const bool bInRange = Time >= 0.0 && Time <= PlayLength;
             if (!bInRange)
             {
@@ -173,16 +205,16 @@ namespace
             return bInRange;
         }
 
-        bool ResolveNotifyIndex(const FMontageEditContext& Context, const TSharedPtr<FJsonObject>& Desc, int32& OutIndex) const
+        bool ResolveNotifyIndex(const FAnimAssetEditContext& Context, const TSharedPtr<FJsonObject>& Desc, int32& OutIndex) const
         {
-            const TArray<FAnimNotifyEvent>& Notifies = Context.Montage->Notifies;
+            const TArray<FAnimNotifyEvent>& Notifies = Context.AnimAsset->Notifies;
 
             int32 Index = INDEX_NONE;
             if (Desc->TryGetNumberField(TEXT("Index"), Index))
             {
                 if (!Notifies.IsValidIndex(Index))
                 {
-                    UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s has no notify at index %d. Present: %s"), *Context.AssetPath, Index, *DescribeNotifies(Context.Montage));
+                    UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s has no notify at index %d. Present: %s"), *Context.AssetPath, Index, *DescribeNotifies(Context.AnimAsset));
                     return false;
                 }
 
@@ -207,7 +239,7 @@ namespace
             {
                 const FAnimNotifyEvent& Event = Notifies[Candidate];
                 const bool bNameMatches = Event.NotifyName.ToString() == Name;
-                const bool bTimeMatches = !bHasAt || FMath::IsNearlyEqual(Event.GetTriggerTime(), static_cast<float>(At), kTimeTolerance);
+                const bool bTimeMatches = !bHasAt || FMath::IsNearlyEqual(Event.GetTriggerTime(), static_cast<float>(At), AnimAssetEdit::kTimeTolerance);
                 const bool bTrackMatches = !bHasTrack || Event.TrackIndex == Track;
                 if (bNameMatches && bTimeMatches && bTrackMatches)
                 {
@@ -223,15 +255,15 @@ namespace
 
             if (Matches.IsEmpty())
             {
-                UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s has no notify matching '%s'. Present: %s"), *Context.AssetPath, *Name, *DescribeNotifies(Context.Montage));
+                UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s has no notify matching '%s'. Present: %s"), *Context.AssetPath, *Name, *DescribeNotifies(Context.AnimAsset));
                 return false;
             }
 
-            UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: '%s' matches %d notifies, narrow it with At or Track. Present: %s"), *Context.AssetPath, *Name, Matches.Num(), *DescribeNotifies(Context.Montage));
+            UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: '%s' matches %d notifies, narrow it with At or Track. Present: %s"), *Context.AssetPath, *Name, Matches.Num(), *DescribeNotifies(Context.AnimAsset));
             return false;
         }
 
-        bool ApplyParameters(const FMontageEditContext& Context, const TSharedPtr<FJsonObject>& Desc, FAnimNotifyEvent& Event) const
+        bool ApplyParameters(const FAnimAssetEditContext& Context, const TSharedPtr<FJsonObject>& Desc, FAnimNotifyEvent& Event) const
         {
             const TSharedPtr<FJsonObject>* Parameters = nullptr;
             if (!Desc->TryGetObjectField(TEXT("Parameters"), Parameters))
@@ -259,20 +291,19 @@ namespace
             return true;
         }
 
-        // Trigger time, duration and track move together: the end handle of a state notify is its own
-        // linkable element, and both handles carry an offset that only holds for the time they were
-        // computed at.
-        void SetTimeAndTrack(UAnimMontage* Montage, FAnimNotifyEvent& Event, float TriggerTime, int32 TrackIndex) const
+        // Time, duration and track move together, both handles of a state notify carry an offset that
+        // only holds for the time it was computed at.
+        void SetTimeAndTrack(UAnimSequenceBase* AnimAsset, FAnimNotifyEvent& Event, float TriggerTime, int32 TrackIndex) const
         {
             const float EventDuration = Event.GetDuration();
 
-            Event.Link(Montage, TriggerTime, Event.GetSlotIndex());
-            Event.RefreshTriggerOffset(Montage->CalculateOffsetForNotify(Event.GetTime()));
+            Event.Link(AnimAsset, TriggerTime, Event.GetSlotIndex());
+            Event.RefreshTriggerOffset(AnimAsset->CalculateOffsetForNotify(Event.GetTime()));
 
             if (EventDuration > 0.0f)
             {
-                Event.EndLink.Link(Montage, Event.GetTime() + EventDuration, Event.GetSlotIndex());
-                Event.RefreshEndTriggerOffset(Montage->CalculateOffsetForNotify(Event.EndLink.GetTime()));
+                Event.EndLink.Link(AnimAsset, Event.GetTime() + EventDuration, Event.GetSlotIndex());
+                Event.RefreshEndTriggerOffset(AnimAsset->CalculateOffsetForNotify(Event.EndLink.GetTime()));
             }
             else
             {
@@ -282,7 +313,7 @@ namespace
             Event.TrackIndex = TrackIndex;
         }
 
-        bool ApplyAdd(FMontageEditContext& Context, const TSharedPtr<FJsonObject>& Desc) const
+        bool ApplyAdd(FAnimAssetEditContext& Context, const TSharedPtr<FJsonObject>& Desc) const
         {
             double TriggerTime = 0.0;
             if (!Desc->TryGetNumberField(TEXT("TriggerTime"), TriggerTime))
@@ -349,26 +380,28 @@ namespace
             }
 
             int32 Track = 0;
-            Desc->TryGetNumberField(TEXT("Track"), Track);
-            if (Track < 0)
+            if (WantsAutoTrack(Desc))
             {
-                UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: Track %d is negative"), *Context.AssetPath, Track);
-                return false;
+                Track = FindClearNotifyTrack(Context.AnimAsset, static_cast<float>(TriggerTime), static_cast<float>(TriggerTime + Duration), INDEX_NONE);
+            }
+            else
+            {
+                Desc->TryGetNumberField(TEXT("Track"), Track);
+                if (Track < 0)
+                {
+                    UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: Track %d is negative"), *Context.AssetPath, Track);
+                    return false;
+                }
             }
 
-            UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("  %s: add '%s' @ %.4f track %d"), *Context.Montage->GetName(), *Name, TriggerTime, Track);
+            UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("  %s: add '%s' @ %.4f track %d"), *Context.AnimAsset->GetName(), *Name, TriggerTime, Track);
 
-            if (!Context.bApply)
-            {
-                return true;
-            }
+            UAnimSequenceBase* AnimAsset = Context.AnimAsset;
+            AnimAsset->Modify();
+            AnimAssetEdit::AddMissingNotifyTracks(AnimAsset, Track);
 
-            UAnimMontage* Montage = Context.Montage;
-            Montage->Modify();
-            AddMissingNotifyTracks(Montage, Track);
-
-            const int32 NewIndex = Montage->Notifies.Add(FAnimNotifyEvent());
-            FAnimNotifyEvent& NewEvent = Montage->Notifies[NewIndex];
+            const int32 NewIndex = AnimAsset->Notifies.Add(FAnimNotifyEvent());
+            FAnimNotifyEvent& NewEvent = AnimAsset->Notifies[NewIndex];
             NewEvent.NotifyName = FName(*Name);
 #if WITH_EDITORONLY_DATA
             NewEvent.Guid = FGuid::NewGuid();
@@ -376,7 +409,7 @@ namespace
 
             if (NotifyClass)
             {
-                UObject* NotifyObject = NewObject<UObject>(Montage, NotifyClass, NAME_None, RF_Transactional);
+                UObject* NotifyObject = NewObject<UObject>(AnimAsset, NotifyClass, NAME_None, RF_Transactional);
                 NewEvent.NotifyStateClass = Cast<UAnimNotifyState>(NotifyObject);
                 NewEvent.Notify = Cast<UAnimNotify>(NotifyObject);
 
@@ -391,7 +424,7 @@ namespace
                 }
             }
 
-            SetTimeAndTrack(Montage, NewEvent, static_cast<float>(TriggerTime), Track);
+            SetTimeAndTrack(AnimAsset, NewEvent, static_cast<float>(TriggerTime), Track);
 
 #if WITH_EDITOR
             // Same hook the panel gives a fresh notify, before the spec's own parameters land.
@@ -408,7 +441,7 @@ namespace
             return ApplyParameters(Context, Desc, NewEvent);
         }
 
-        bool ApplyModify(FMontageEditContext& Context, const TSharedPtr<FJsonObject>& Desc) const
+        bool ApplyModify(FAnimAssetEditContext& Context, const TSharedPtr<FJsonObject>& Desc) const
         {
             int32 Index = INDEX_NONE;
             if (!ResolveNotifyIndex(Context, Desc, Index))
@@ -431,8 +464,8 @@ namespace
                 }
             }
 
-            UAnimMontage* Montage = Context.Montage;
-            const FAnimNotifyEvent& Current = Montage->Notifies[Index];
+            UAnimSequenceBase* AnimAsset = Context.AnimAsset;
+            const FAnimNotifyEvent& Current = AnimAsset->Notifies[Index];
             const bool bIsState = Current.NotifyStateClass != nullptr;
 
             // Authored time, not GetTriggerTime(): re-linking at the trigger time would fold the
@@ -466,11 +499,18 @@ namespace
             int32 Track = Current.TrackIndex;
             if (bHasTrack)
             {
-                Desc->TryGetNumberField(TEXT("Track"), Track);
-                if (Track < 0)
+                if (WantsAutoTrack(Desc))
                 {
-                    UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: Track %d is negative"), *Context.AssetPath, Track);
-                    return false;
+                    Track = FindClearNotifyTrack(AnimAsset, static_cast<float>(TriggerTime), static_cast<float>(TriggerTime + Duration), Index);
+                }
+                else
+                {
+                    Desc->TryGetNumberField(TEXT("Track"), Track);
+                    if (Track < 0)
+                    {
+                        UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: Track %d is negative"), *Context.AssetPath, Track);
+                        return false;
+                    }
                 }
             }
 
@@ -481,17 +521,12 @@ namespace
                 return false;
             }
 
-            UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("  %s: modify '%s' @ %.4f track %d"), *Montage->GetName(), *Current.NotifyName.ToString(), TriggerTime, Track);
+            UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("  %s: modify '%s' @ %.4f track %d"), *AnimAsset->GetName(), *Current.NotifyName.ToString(), TriggerTime, Track);
 
-            if (!Context.bApply)
-            {
-                return true;
-            }
+            AnimAsset->Modify();
+            AnimAssetEdit::AddMissingNotifyTracks(AnimAsset, Track);
 
-            Montage->Modify();
-            AddMissingNotifyTracks(Montage, Track);
-
-            FAnimNotifyEvent& Event = Montage->Notifies[Index];
+            FAnimNotifyEvent& Event = AnimAsset->Notifies[Index];
             if (bHasNewName)
             {
                 Event.NotifyName = FName(*NewName);
@@ -505,13 +540,13 @@ namespace
             // Links stay untouched when the spec only rewrites parameters or the name.
             if (bHasTriggerTime || bHasDuration || bHasTrack)
             {
-                SetTimeAndTrack(Montage, Event, static_cast<float>(TriggerTime), Track);
+                SetTimeAndTrack(AnimAsset, Event, static_cast<float>(TriggerTime), Track);
             }
 
             return ApplyParameters(Context, Desc, Event);
         }
 
-        bool ApplyRemove(FMontageEditContext& Context, const TSharedPtr<FJsonObject>& Desc) const
+        bool ApplyRemove(FAnimAssetEditContext& Context, const TSharedPtr<FJsonObject>& Desc) const
         {
             int32 Index = INDEX_NONE;
             if (!ResolveNotifyIndex(Context, Desc, Index))
@@ -519,23 +554,18 @@ namespace
                 return false;
             }
 
-            UAnimMontage* Montage = Context.Montage;
-            const FAnimNotifyEvent& Event = Montage->Notifies[Index];
-            UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("  %s: remove '%s' @ %.4f track %d"), *Montage->GetName(), *Event.NotifyName.ToString(), Event.GetTriggerTime(), Event.TrackIndex);
+            UAnimSequenceBase* AnimAsset = Context.AnimAsset;
+            const FAnimNotifyEvent& Event = AnimAsset->Notifies[Index];
+            UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("  %s: remove '%s' @ %.4f track %d"), *AnimAsset->GetName(), *Event.NotifyName.ToString(), Event.GetTriggerTime(), Event.TrackIndex);
 
-            if (!Context.bApply)
-            {
-                return true;
-            }
-
-            Montage->Modify();
-            Montage->Notifies.RemoveAt(Index);
+            AnimAsset->Modify();
+            AnimAsset->Notifies.RemoveAt(Index);
             return true;
         }
     };
 }
 
-TUniquePtr<IMontageWriter> MakeMontageNotifyWriter()
+TUniquePtr<IAnimAssetWriter> MakeAnimNotifyWriter()
 {
-    return MakeUnique<FMontageNotifyWriter>();
+    return MakeUnique<FAnimNotifyWriter>();
 }

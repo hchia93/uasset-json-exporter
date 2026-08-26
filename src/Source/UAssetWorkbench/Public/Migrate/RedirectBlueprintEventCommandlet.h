@@ -4,17 +4,10 @@
 #include "Commandlets/Commandlet.h"
 #include "RedirectBlueprintEventCommandlet.generated.h"
 
-// Redirects a Blueprint event override to a renamed C++ member, doing the Blueprint-side follow-up
-// that CoreRedirects cannot. Renaming an interface BlueprintNativeEvent/BlueprintImplementableEvent
-// (or a parent-class event) orphans the BP override into a dead custom event that no longer fires.
-// This commandlet finds that orphan by its old name and rewires it to the new event, moving pin links.
-//
-// One operation per commandlet. Generic: the owner class / event names are runtime args, nothing project-specific.
-//
-// Usage:
-//   -run=RedirectBlueprintEvent -OwnerClass="/Script/Module.NewOwnerClass"
-//        -OldEvent="OldEventName" -NewEvent="NewEventName" -assets="/Game/A,/Game/B" [-apply]
-//   Without -apply: dry run, reports only. With -apply: compile + save each modified Blueprint.
+// Rewires a Blueprint event override orphaned by a C++ rename, the Blueprint-side follow-up CoreRedirects
+// cannot do. Finds the dead custom event by its old name and moves its pin links onto the new event.
+//   -run=RedirectBlueprintEvent -OwnerClass= -OldEvent= -NewEvent= -assets="/Game/A,/Game/B" [-apply]
+// Contract: Docs/Migrate.md
 UCLASS()
 class URedirectBlueprintEventCommandlet : public UCommandlet
 {
@@ -27,5 +20,5 @@ public:
 
 private:
     // Returns redirected node count for this Blueprint (0 = nothing to do or not found).
-    int32 RedirectBlueprintEvents(const FString& AssetPath, UClass* OwnerClass, FName OldEvent, FName NewEvent, bool bApply) const;
+    int32 RedirectBlueprintEvents(const FString& AssetPath, UClass* OwnerClass, FName OldEvent, FName NewEvent, bool bApply, bool& OutSaveFailed) const;
 };

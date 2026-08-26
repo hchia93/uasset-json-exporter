@@ -2,9 +2,8 @@
 
 #include "CoreMinimal.h"
 
-// File-based contract between external wrappers and the in-editor queue subsystem.
-// Layout (relative to ProjectDir):
-//   Saved/UAssetExportQueue/.alive                  heartbeat (mtime touched periodically)
+// File-based contract between external wrappers and the in-editor queue subsystem, under ProjectDir.
+//   Saved/UAssetExportQueue/.alive                  heartbeat, mtime touched periodically
 //   Saved/UAssetExportQueue/pending/<uuid>.json     wrapper writes task here
 //   Saved/UAssetExportQueue/processing/<uuid>.json  subsystem claims via rename
 //   Saved/UAssetExportQueue/done/<uuid>.json        subsystem writes result here

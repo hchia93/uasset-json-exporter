@@ -7,20 +7,11 @@
 
 class UWidget;
 class UPanelSlot;
-class UEdGraph;
-class UEdGraphNode;
-class UEdGraphPin;
 class UWidgetAnimation;
 
-/*
- * Exports Widget Blueprint structure (EdGraph, WidgetTree, layout properties, animations) to JSON.
- *
- * Usage:
- *   UnrealEditor-Cmd.exe Project.uproject -run=WidgetLayoutExport -assets="/Game/Path/WBP_A,/Game/Path/WBP_B"
- *
- * Output:
- *   <ProjectDir>/Intermediate/UAssetExport/<AssetPath>.json
- */
+// Exports Widget Blueprint structure to JSON: EdGraph, widget tree, layout properties, animations.
+//   UnrealEditor-Cmd.exe Project.uproject -run=WidgetLayoutExport -assets="/Game/Path/WBP_A,/Game/Path/WBP_B"
+// Contract: Docs/Export.md
 UCLASS()
 class UWidgetLayoutExportCommandlet : public UCommandlet
 {
@@ -38,10 +29,5 @@ private:
     TSharedPtr<FJsonObject> ExportWidget(UWidget* Widget) const;
     TSharedPtr<FJsonObject> ExportSlotProperties(UPanelSlot* Slot) const;
     TSharedPtr<FJsonObject> ExportAnimation(UWidgetAnimation* Animation) const;
-
-    // EdGraph export (shared with BlueprintEdGraphExportCommandlet)
-    TSharedPtr<FJsonObject> ExportGraph(const UEdGraph* Graph) const;
-    TSharedPtr<FJsonObject> ExportNode(const UEdGraphNode* Node) const;
-    TSharedPtr<FJsonObject> ExportPin(const UEdGraphPin* Pin) const;
 
 };

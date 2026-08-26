@@ -1,29 +1,186 @@
 #include "Export/BlueprintEdGraphExportCommandlet.h"
 
 #include "AssetRegistry/AssetRegistryModule.h"
+#include "Components/ActorComponent.h"
+#include "Curves/CurveFloat.h"
+#include "Curves/CurveLinearColor.h"
+#include "Curves/CurveVector.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "EdGraph/EdGraph.h"
-#include "EdGraph/EdGraphNode.h"
-#include "EdGraph/EdGraphPin.h"
+#include "EdGraphSchema_K2.h"
 #include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/InheritableComponentHandler.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/SCS_Node.h"
-#include "K2Node.h"
-#include "K2Node_CallFunction.h"
-#include "K2Node_DynamicCast.h"
-#include "K2Node_Event.h"
-#include "K2Node_MacroInstance.h"
-#include "K2Node_Variable.h"
+#include "Engine/TimelineTemplate.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "UObject/UObjectIterator.h"
 
+#include "Export/EdGraphJsonSerializer.h"
 #include "UAssetWorkbenchModule.h"
 #include "UAssetWorkbenchUtil.h"
 #include "UAssetWorkbenchVersion.h"
+
+namespace
+{
+    const TCHAR* ContainerTypeName(EPinContainerType ContainerType)
+    {
+        switch (ContainerType)
+        {
+        case EPinContainerType::Array:
+            return TEXT("Array");
+        case EPinContainerType::Set:
+            return TEXT("Set");
+        case EPinContainerType::Map:
+            return TEXT("Map");
+        default:
+            return TEXT("None");
+        }
+    }
+
+    const TCHAR* BlueprintTypeName(EBlueprintType Type)
+    {
+        switch (Type)
+        {
+        case BPTYPE_Const:
+            return TEXT("Const");
+        case BPTYPE_MacroLibrary:
+            return TEXT("MacroLibrary");
+        case BPTYPE_Interface:
+            return TEXT("Interface");
+        case BPTYPE_LevelScript:
+            return TEXT("LevelScript");
+        case BPTYPE_FunctionLibrary:
+            return TEXT("FunctionLibrary");
+        default:
+            return TEXT("Normal");
+        }
+    }
+
+    const TCHAR* TimelineLengthModeName(ETimelineLengthMode LengthMode)
+    {
+        return LengthMode == TL_LastKeyFrame ? TEXT("LastKeyFrame") : TEXT("TimelineLength");
+    }
+
+    // A Blueprint package yields both the Blueprint and its generated class, registry order between them is not stable.
+    FString PrimaryAssetClassName(const TArray<FAssetData>& AssetDataList)
+    {
+        for (const FAssetData& AssetData : AssetDataList)
+        {
+            const FString ClassName = AssetData.AssetClassPath.GetAssetName().ToString();
+            if (!ClassName.EndsWith(TEXT("BlueprintGeneratedClass")))
+            {
+                return ClassName;
+            }
+        }
+
+        return AssetDataList[0].AssetClassPath.GetAssetName().ToString();
+    }
+
+    TSharedPtr<FJsonValue> MakeTimelineTrackEntry(FName TrackName, const UObject* Curve)
+    {
+        TSharedPtr<FJsonObject> TrackObj = MakeShared<FJsonObject>();
+        TrackObj->SetStringField(TEXT("Name"), TrackName.ToString());
+
+        if (Curve)
+        {
+            TrackObj->SetStringField(TEXT("Curve"), Curve->GetPathName());
+        }
+
+        return MakeShared<FJsonValueObject>(TrackObj);
+    }
+
+    // Editor-side variable metadata lives on NewVariables, the generated FProperty only carries the compiled result.
+    void AppendVariableMetadata(const FBPVariableDescription& Description, const TSharedPtr<FJsonObject>& VarObj)
+    {
+        if (!Description.Category.IsEmpty())
+        {
+            VarObj->SetStringField(TEXT("Category"), Description.Category.ToString());
+        }
+
+        if (Description.HasMetaData(TEXT("tooltip")))
+        {
+            const FString& Tooltip = Description.GetMetaData(TEXT("tooltip"));
+            if (!Tooltip.IsEmpty())
+            {
+                VarObj->SetStringField(TEXT("Tooltip"), Tooltip);
+            }
+        }
+
+        VarObj->SetStringField(TEXT("PinType"), Description.VarType.PinCategory.ToString());
+
+        if (Description.VarType.PinSubCategoryObject.IsValid())
+        {
+            VarObj->SetStringField(TEXT("SubType"), Description.VarType.PinSubCategoryObject->GetName());
+        }
+
+        VarObj->SetStringField(TEXT("Container"), ContainerTypeName(Description.VarType.ContainerType));
+
+        if (Description.VarType.ContainerType == EPinContainerType::Map)
+        {
+            VarObj->SetStringField(TEXT("ValueType"), Description.VarType.PinValueType.TerminalCategory.ToString());
+        }
+
+        const uint64 Flags = Description.PropertyFlags;
+
+        if (!(Flags & CPF_DisableEditOnInstance))
+        {
+            VarObj->SetBoolField(TEXT("InstanceEditable"), true);
+        }
+        if (Flags & CPF_BlueprintReadOnly)
+        {
+            VarObj->SetBoolField(TEXT("ReadOnly"), true);
+        }
+        if (Description.HasMetaData(FBlueprintMetadata::MD_ExposeOnSpawn) && Description.GetMetaData(FBlueprintMetadata::MD_ExposeOnSpawn) == TEXT("true"))
+        {
+            VarObj->SetBoolField(TEXT("ExposeOnSpawn"), true);
+        }
+        if (Description.HasMetaData(FBlueprintMetadata::MD_Private))
+        {
+            VarObj->SetBoolField(TEXT("Private"), true);
+        }
+        if (Flags & CPF_Transient)
+        {
+            VarObj->SetBoolField(TEXT("Transient"), true);
+        }
+        if (Flags & CPF_SaveGame)
+        {
+            VarObj->SetBoolField(TEXT("SaveGame"), true);
+        }
+        if (Flags & CPF_Config)
+        {
+            VarObj->SetBoolField(TEXT("Config"), true);
+        }
+        if (Flags & CPF_Net)
+        {
+            VarObj->SetBoolField(TEXT("Replicated"), true);
+        }
+        if (Flags & CPF_RepNotify)
+        {
+            VarObj->SetBoolField(TEXT("RepNotify"), true);
+            if (!Description.RepNotifyFunc.IsNone())
+            {
+                VarObj->SetStringField(TEXT("RepNotifyFunc"), Description.RepNotifyFunc.ToString());
+            }
+        }
+        if (Flags & CPF_AdvancedDisplay)
+        {
+            VarObj->SetBoolField(TEXT("AdvancedDisplay"), true);
+        }
+        if (Flags & CPF_Interp)
+        {
+            VarObj->SetBoolField(TEXT("ExposeToCinematics"), true);
+        }
+
+        // Stays put across renames, external tooling addresses variables by it.
+        VarObj->SetStringField(TEXT("Guid"), Description.VarGuid.ToString());
+    }
+}
 
 UBlueprintEdGraphExportCommandlet::UBlueprintEdGraphExportCommandlet()
 {
@@ -72,10 +229,10 @@ int32 UBlueprintEdGraphExportCommandlet::Main(const FString& Params)
             continue;
         }
 
-        FString OutputPath = UAssetWorkbench::GetExportPath(AssetPath);
-        if (UAssetWorkbench::SaveJsonToFile(JsonObject.ToSharedRef(), OutputPath))
+        UAssetWorkbench::FExportTarget ExportTarget(AssetPath);
+        if (ExportTarget.Save(JsonObject.ToSharedRef()))
         {
-            UE_LOG(LogUAssetWorkbenchExporter, Display, TEXT("Exported: %s -> %s"), *AssetPath, *OutputPath);
+            UE_LOG(LogUAssetWorkbenchExporter, Display, TEXT("Exported: %s -> %s"), *AssetPath, *ExportTarget.GetPath());
             ExportedCount++;
         }
     }
@@ -94,10 +251,18 @@ TSharedPtr<FJsonObject> UBlueprintEdGraphExportCommandlet::ExportBlueprint(UBlue
     Root->SetStringField(TEXT("AssetPath"), Blueprint->GetPathName());
     Root->SetStringField(TEXT("ExportTimestamp"), FDateTime::Now().ToString());
 
+    Root->SetStringField(TEXT("BlueprintType"), BlueprintTypeName(Blueprint->BlueprintType));
+
     // Parent class
     if (Blueprint->ParentClass)
     {
         Root->SetStringField(TEXT("ParentClass"), Blueprint->ParentClass->GetName());
+        Root->SetStringField(TEXT("ParentClassPath"), Blueprint->ParentClass->GetPathName());
+    }
+
+    if (Blueprint->GeneratedClass)
+    {
+        Root->SetStringField(TEXT("GeneratedClassPath"), Blueprint->GeneratedClass->GetPathName());
     }
 
     // Implemented interfaces (BP "Implements Interface" list). Answers "who implements interface X"
@@ -134,6 +299,12 @@ TSharedPtr<FJsonObject> UBlueprintEdGraphExportCommandlet::ExportBlueprint(UBlue
     }
 
     // Variables (member properties on generated class)
+    TMap<FName, const FBPVariableDescription*> VariableDescriptions;
+    for (const FBPVariableDescription& Description : Blueprint->NewVariables)
+    {
+        VariableDescriptions.Add(Description.VarName, &Description);
+    }
+
     TArray<TSharedPtr<FJsonValue>> VariablesArray;
     int32 UserVariableCount = 0;
     if (UClass* GeneratedClass = Blueprint->GeneratedClass)
@@ -164,6 +335,11 @@ TSharedPtr<FJsonObject> UBlueprintEdGraphExportCommandlet::ExportBlueprint(UBlue
                 }
             }
 
+            if (const FBPVariableDescription** Description = VariableDescriptions.Find(Property->GetFName()))
+            {
+                AppendVariableMetadata(**Description, VarObj);
+            }
+
             VariablesArray.Add(MakeShared<FJsonValueObject>(VarObj));
         }
     }
@@ -171,9 +347,109 @@ TSharedPtr<FJsonObject> UBlueprintEdGraphExportCommandlet::ExportBlueprint(UBlue
     Root->SetNumberField(TEXT("VariableCount"), VariablesArray.Num());
     Root->SetNumberField(TEXT("UserVariableCount"), UserVariableCount);
 
-    // Components (from SimpleConstructionScript) with hierarchy info + property overrides
-    // Each entry includes ParentName / IsRoot so consumers can identify root component cheaply
-    // without re-traversing the tree.
+    // Event dispatchers, addressable by name with their signature. They also stay in Variables[] as delegate properties.
+    TArray<TSharedPtr<FJsonValue>> DispatchersArray;
+    for (const FBPVariableDescription& Description : Blueprint->NewVariables)
+    {
+        const bool bIsMulticast = Description.VarType.PinCategory == UEdGraphSchema_K2::PC_MCDelegate;
+        const bool bIsSingleCast = Description.VarType.PinCategory == UEdGraphSchema_K2::PC_Delegate;
+        if (!bIsMulticast && !bIsSingleCast)
+        {
+            continue;
+        }
+
+        TSharedPtr<FJsonObject> DispatcherObj = MakeShared<FJsonObject>();
+        DispatcherObj->SetStringField(TEXT("Name"), Description.VarName.ToString());
+
+        if (!Description.Category.IsEmpty())
+        {
+            DispatcherObj->SetStringField(TEXT("Category"), Description.Category.ToString());
+        }
+
+        for (UEdGraph* SignatureGraph : Blueprint->DelegateSignatureGraphs)
+        {
+            if (!SignatureGraph || SignatureGraph->GetFName() != Description.VarName)
+            {
+                continue;
+            }
+
+            TSharedPtr<FJsonObject> Signature = EdGraphJson::ExportFunctionSignature(SignatureGraph, Blueprint, false);
+            if (Signature.IsValid())
+            {
+                DispatcherObj->SetObjectField(TEXT("Signature"), Signature);
+            }
+            break;
+        }
+
+        DispatchersArray.Add(MakeShared<FJsonValueObject>(DispatcherObj));
+    }
+    Root->SetArrayField(TEXT("EventDispatchers"), DispatchersArray);
+    Root->SetNumberField(TEXT("EventDispatcherCount"), DispatchersArray.Num());
+
+    // Timelines. The generated class only exposes an opaque component property plus a __Direction_ enum, tracks live here.
+    TArray<TSharedPtr<FJsonValue>> TimelinesArray;
+    for (const UTimelineTemplate* Timeline : Blueprint->Timelines)
+    {
+        if (!Timeline)
+        {
+            continue;
+        }
+
+        TSharedPtr<FJsonObject> TimelineObj = MakeShared<FJsonObject>();
+        TimelineObj->SetStringField(TEXT("Name"), Timeline->GetVariableName().ToString());
+        TimelineObj->SetNumberField(TEXT("Length"), Timeline->TimelineLength);
+        TimelineObj->SetStringField(TEXT("LengthMode"), TimelineLengthModeName(Timeline->LengthMode));
+        TimelineObj->SetBoolField(TEXT("Loop"), Timeline->bLoop != 0);
+        TimelineObj->SetBoolField(TEXT("AutoPlay"), Timeline->bAutoPlay != 0);
+        TimelineObj->SetBoolField(TEXT("Replicated"), Timeline->bReplicated != 0);
+        TimelineObj->SetBoolField(TEXT("IgnoreTimeDilation"), Timeline->bIgnoreTimeDilation != 0);
+
+        TArray<TSharedPtr<FJsonValue>> FloatTracksArray;
+        for (const FTTFloatTrack& Track : Timeline->FloatTracks)
+        {
+            FloatTracksArray.Add(MakeTimelineTrackEntry(Track.GetTrackName(), Track.CurveFloat));
+        }
+        if (FloatTracksArray.Num() > 0)
+        {
+            TimelineObj->SetArrayField(TEXT("FloatTracks"), FloatTracksArray);
+        }
+
+        TArray<TSharedPtr<FJsonValue>> VectorTracksArray;
+        for (const FTTVectorTrack& Track : Timeline->VectorTracks)
+        {
+            VectorTracksArray.Add(MakeTimelineTrackEntry(Track.GetTrackName(), Track.CurveVector));
+        }
+        if (VectorTracksArray.Num() > 0)
+        {
+            TimelineObj->SetArrayField(TEXT("VectorTracks"), VectorTracksArray);
+        }
+
+        TArray<TSharedPtr<FJsonValue>> LinearColorTracksArray;
+        for (const FTTLinearColorTrack& Track : Timeline->LinearColorTracks)
+        {
+            LinearColorTracksArray.Add(MakeTimelineTrackEntry(Track.GetTrackName(), Track.CurveLinearColor));
+        }
+        if (LinearColorTracksArray.Num() > 0)
+        {
+            TimelineObj->SetArrayField(TEXT("LinearColorTracks"), LinearColorTracksArray);
+        }
+
+        TArray<TSharedPtr<FJsonValue>> EventTracksArray;
+        for (const FTTEventTrack& Track : Timeline->EventTracks)
+        {
+            EventTracksArray.Add(MakeTimelineTrackEntry(Track.GetTrackName(), Track.CurveKeys));
+        }
+        if (EventTracksArray.Num() > 0)
+        {
+            TimelineObj->SetArrayField(TEXT("EventTracks"), EventTracksArray);
+        }
+
+        TimelinesArray.Add(MakeShared<FJsonValueObject>(TimelineObj));
+    }
+    Root->SetArrayField(TEXT("Timelines"), TimelinesArray);
+    Root->SetNumberField(TEXT("TimelineCount"), TimelinesArray.Num());
+
+    // ParentName / IsRoot ride along so a consumer identifies the root without re-traversing the tree.
     TArray<TSharedPtr<FJsonValue>> ComponentsArray;
     FString RootComponentName;
     FString RootComponentClass;
@@ -229,6 +505,17 @@ TSharedPtr<FJsonObject> UBlueprintEdGraphExportCommandlet::ExportBlueprint(UBlue
                 }
             }
 
+            // SCS root nodes attached to an inherited native component record the target here, not in the tree.
+            if (!SCSNode->ParentComponentOrVariableName.IsNone())
+            {
+                CompObj->SetStringField(TEXT("ParentName"), SCSNode->ParentComponentOrVariableName.ToString());
+                CompObj->SetBoolField(TEXT("ParentIsNative"), SCSNode->bIsParentComponentNative);
+            }
+            if (!SCSNode->AttachToName.IsNone())
+            {
+                CompObj->SetStringField(TEXT("AttachSocket"), SCSNode->AttachToName.ToString());
+            }
+
             const bool bIsEditorOnly = SCSNode->ComponentTemplate->IsEditorOnly();
             CompObj->SetBoolField(TEXT("IsEditorOnly"), bIsEditorOnly);
             if (!bIsEditorOnly)
@@ -268,7 +555,39 @@ TSharedPtr<FJsonObject> UBlueprintEdGraphExportCommandlet::ExportBlueprint(UBlue
         Root->SetStringField(TEXT("RootComponentClass"), RootComponentClass);
     }
 
-    // Inherited component property overrides (C++ default subobjects modified in Blueprint CDO)
+    // Components[] is this Blueprint's own SCS only, but a Defaults spec addresses parent-Blueprint
+    // components by these names too, so the addressable set is not readable without them.
+    TArray<TSharedPtr<FJsonValue>> InheritedComponentsArray;
+    for (UClass* Ancestor = Blueprint->ParentClass; Ancestor; Ancestor = Ancestor->GetSuperClass())
+    {
+        UBlueprintGeneratedClass* GeneratedAncestor = Cast<UBlueprintGeneratedClass>(Ancestor);
+        if (!GeneratedAncestor || !GeneratedAncestor->SimpleConstructionScript)
+        {
+            continue;
+        }
+
+        for (USCS_Node* AncestorNode : GeneratedAncestor->SimpleConstructionScript->GetAllNodes())
+        {
+            if (!AncestorNode || !AncestorNode->ComponentTemplate)
+            {
+                continue;
+            }
+
+            TSharedPtr<FJsonObject> InheritedComp = MakeShared<FJsonObject>();
+            InheritedComp->SetStringField(TEXT("Name"), AncestorNode->GetVariableName().ToString());
+            InheritedComp->SetStringField(TEXT("Class"), AncestorNode->ComponentTemplate->GetClass()->GetName());
+            InheritedComp->SetStringField(TEXT("ParentBlueprint"), GeneratedAncestor->GetPathName());
+            InheritedComponentsArray.Add(MakeShared<FJsonValueObject>(InheritedComp));
+        }
+    }
+    if (InheritedComponentsArray.Num() > 0)
+    {
+        Root->SetArrayField(TEXT("InheritedComponents"), InheritedComponentsArray);
+    }
+
+    // Inherited component property overrides, two sources: C++ default subobjects modified in the
+    // Blueprint CDO, and parent-Blueprint SCS components the handler keeps an override template for.
+    TArray<TSharedPtr<FJsonValue>> InheritedOverridesArray;
     if (UClass* GeneratedClass = Blueprint->GeneratedClass)
     {
         UObject* CDO = GeneratedClass->GetDefaultObject();
@@ -277,8 +596,6 @@ TSharedPtr<FJsonObject> UBlueprintEdGraphExportCommandlet::ExportBlueprint(UBlue
 
         if (CDO && ParentCDO)
         {
-            TArray<TSharedPtr<FJsonValue>> InheritedOverridesArray;
-
             for (TFieldIterator<FObjectProperty> PropIt(ParentClass); PropIt; ++PropIt)
             {
                 FObjectProperty* ObjProp = *PropIt;
@@ -310,17 +627,51 @@ TSharedPtr<FJsonObject> UBlueprintEdGraphExportCommandlet::ExportBlueprint(UBlue
                     InheritedOverridesArray.Add(MakeShared<FJsonValueObject>(InheritedObj));
                 }
             }
+        }
+    }
 
-            if (InheritedOverridesArray.Num() > 0)
+    // A parent-Blueprint component is not editable in place, its override template hangs off the
+    // handler rather than the CDO, so the subobject diff above never sees it.
+    if (UBlueprintGeneratedClass* GeneratedClass = Cast<UBlueprintGeneratedClass>(Blueprint->GeneratedClass))
+    {
+        if (UInheritableComponentHandler* Handler = GeneratedClass->GetInheritableComponentHandler())
+        {
+            for (TArray<FComponentOverrideRecord>::TIterator RecordIt = Handler->CreateRecordIterator(); RecordIt; ++RecordIt)
             {
-                Root->SetArrayField(TEXT("InheritedComponentOverrides"), InheritedOverridesArray);
+                const FComponentOverrideRecord& Record = *RecordIt;
+                USCS_Node* ParentNode = Record.ComponentKey.FindSCSNode();
+                if (!Record.ComponentTemplate || !ParentNode || !ParentNode->ComponentTemplate)
+                {
+                    continue;
+                }
+
+                TArray<TSharedPtr<FJsonValue>> RecordOverrides;
+                ExportPropertyOverridesCompare(Record.ComponentTemplate, ParentNode->ComponentTemplate, RecordOverrides);
+                if (RecordOverrides.Num() == 0)
+                {
+                    continue;
+                }
+
+                TSharedPtr<FJsonObject> InheritedObj = MakeShared<FJsonObject>();
+                InheritedObj->SetStringField(TEXT("Name"), Record.ComponentKey.GetSCSVariableName().ToString());
+                InheritedObj->SetStringField(TEXT("Class"), Record.ComponentTemplate->GetClass()->GetName());
+                InheritedObj->SetStringField(TEXT("Source"), TEXT("ParentBlueprint"));
+                if (UClass* OwnerClass = Record.ComponentKey.GetComponentOwner())
+                {
+                    InheritedObj->SetStringField(TEXT("ParentBlueprint"), OwnerClass->GetPathName());
+                }
+                InheritedObj->SetArrayField(TEXT("PropertyOverrides"), RecordOverrides);
+                InheritedOverridesArray.Add(MakeShared<FJsonValueObject>(InheritedObj));
             }
         }
     }
 
-    // Actor-level CDO: full resolved properties (Tags, bHidden, replication flags, etc.)
-    // and the deltas vs the parent class CDO. Lets external tools see what the BP author
-    // tweaked at the actor level (independent of components).
+    if (InheritedOverridesArray.Num() > 0)
+    {
+        Root->SetArrayField(TEXT("InheritedComponentOverrides"), InheritedOverridesArray);
+    }
+
+    // Full resolved actor CDO plus the delta against the parent, so a reader sees what the author tweaked.
     if (UClass* GeneratedClass = Blueprint->GeneratedClass)
     {
         if (UObject* CDO = GeneratedClass->GetDefaultObject())
@@ -346,42 +697,93 @@ TSharedPtr<FJsonObject> UBlueprintEdGraphExportCommandlet::ExportBlueprint(UBlue
         }
     }
 
-    // Graphs (EventGraphs + FunctionGraphs)
-    // Default: emit Name + GraphType + NodeCount + HasLogic only. Pass -graphs to include full nodes/pins.
+    // IntermediateGeneratedGraphs stays out, it is transient compiler output.
+    FEdGraphJsonOptions GraphOptions;
+    GraphOptions.bWithNodes = Options.bIncludeGraphs;
+    GraphOptions.bRecurseSubGraphs = Options.bIncludeGraphs;
+    FEdGraphJsonSerializer Serializer(GraphOptions);
+
     TArray<TSharedPtr<FJsonValue>> GraphsArray;
     int32 EventGraphNodeTotal = 0;
     int32 FunctionGraphNodeTotal = 0;
     bool bHasAnyLogic = false;
 
+    // Signature rides outside bWithNodes, the lean shape still has to answer what a function takes and returns.
+    auto AppendGraph = [&](UEdGraph* Graph, const TCHAR* GraphType, bool bWithSignature) -> TSharedPtr<FJsonObject>
+    {
+        TSharedPtr<FJsonObject> GraphObj = Serializer.ExportGraph(Graph, GraphType);
+        if (!GraphObj.IsValid())
+        {
+            return nullptr;
+        }
+
+        if (bWithSignature)
+        {
+            const bool bIsInterfaceGraph = FCString::Strcmp(GraphType, TEXT("InterfaceFunction")) == 0;
+            TSharedPtr<FJsonObject> Signature = EdGraphJson::ExportFunctionSignature(Graph, Blueprint, bIsInterfaceGraph);
+            if (Signature.IsValid())
+            {
+                GraphObj->SetObjectField(TEXT("Signature"), Signature);
+            }
+        }
+
+        bool bGraphLogic = false;
+        GraphObj->TryGetBoolField(TEXT("HasLogic"), bGraphLogic);
+        bHasAnyLogic = bHasAnyLogic || bGraphLogic;
+
+        GraphsArray.Add(MakeShared<FJsonValueObject>(GraphObj));
+        return GraphObj;
+    };
+
     for (UEdGraph* Graph : Blueprint->UbergraphPages)
     {
-        TSharedPtr<FJsonObject> GraphObj = ExportGraph(Graph, Options);
+        TSharedPtr<FJsonObject> GraphObj = AppendGraph(Graph, TEXT("EventGraph"), false);
         if (GraphObj.IsValid())
         {
-            GraphObj->SetStringField(TEXT("GraphType"), TEXT("EventGraph"));
             int32 NodeCount = 0;
             GraphObj->TryGetNumberField(TEXT("NodeCount"), NodeCount);
             EventGraphNodeTotal += NodeCount;
-            bool bGraphLogic = false;
-            GraphObj->TryGetBoolField(TEXT("HasLogic"), bGraphLogic);
-            bHasAnyLogic = bHasAnyLogic || bGraphLogic;
-            GraphsArray.Add(MakeShared<FJsonValueObject>(GraphObj));
         }
     }
 
     for (UEdGraph* Graph : Blueprint->FunctionGraphs)
     {
-        TSharedPtr<FJsonObject> GraphObj = ExportGraph(Graph, Options);
+        TSharedPtr<FJsonObject> GraphObj = AppendGraph(Graph, TEXT("Function"), true);
         if (GraphObj.IsValid())
         {
-            GraphObj->SetStringField(TEXT("GraphType"), TEXT("Function"));
             int32 NodeCount = 0;
             GraphObj->TryGetNumberField(TEXT("NodeCount"), NodeCount);
             FunctionGraphNodeTotal += NodeCount;
-            bool bGraphLogic = false;
-            GraphObj->TryGetBoolField(TEXT("HasLogic"), bGraphLogic);
-            bHasAnyLogic = bHasAnyLogic || bGraphLogic;
-            GraphsArray.Add(MakeShared<FJsonValueObject>(GraphObj));
+        }
+    }
+
+    for (UEdGraph* Graph : Blueprint->MacroGraphs)
+    {
+        AppendGraph(Graph, TEXT("Macro"), true);
+    }
+
+    for (UEdGraph* Graph : Blueprint->DelegateSignatureGraphs)
+    {
+        AppendGraph(Graph, TEXT("DelegateSignature"), true);
+    }
+
+    int32 InterfaceGraphCount = 0;
+    for (const FBPInterfaceDescription& InterfaceDesc : Blueprint->ImplementedInterfaces)
+    {
+        UClass* InterfaceClass = InterfaceDesc.Interface.Get();
+        for (UEdGraph* Graph : InterfaceDesc.Graphs)
+        {
+            TSharedPtr<FJsonObject> GraphObj = AppendGraph(Graph, TEXT("InterfaceFunction"), true);
+            if (!GraphObj.IsValid())
+            {
+                continue;
+            }
+
+            if (InterfaceClass)
+            {
+                GraphObj->SetStringField(TEXT("Interface"), InterfaceClass->GetName());
+            }
+            ++InterfaceGraphCount;
         }
     }
 
@@ -389,6 +791,9 @@ TSharedPtr<FJsonObject> UBlueprintEdGraphExportCommandlet::ExportBlueprint(UBlue
     Root->SetNumberField(TEXT("EventGraphNodeTotal"), EventGraphNodeTotal);
     Root->SetNumberField(TEXT("FunctionGraphNodeTotal"), FunctionGraphNodeTotal);
     Root->SetNumberField(TEXT("FunctionGraphCount"), Blueprint->FunctionGraphs.Num());
+    Root->SetNumberField(TEXT("MacroGraphCount"), Blueprint->MacroGraphs.Num());
+    Root->SetNumberField(TEXT("DelegateSignatureGraphCount"), Blueprint->DelegateSignatureGraphs.Num());
+    Root->SetNumberField(TEXT("InterfaceGraphCount"), InterfaceGraphCount);
     Root->SetBoolField(TEXT("HasAnyGraphLogic"), bHasAnyLogic);
 
     // Referenced assets via AssetRegistry
@@ -423,7 +828,7 @@ TSharedPtr<FJsonObject> UBlueprintEdGraphExportCommandlet::ExportBlueprint(UBlue
             AssetRegistry.GetAssetsByPackageName(RefName, AssetDataList, true);
             if (AssetDataList.Num() > 0)
             {
-                AssetClassName = AssetDataList[0].AssetClassPath.GetAssetName().ToString();
+                AssetClassName = PrimaryAssetClassName(AssetDataList);
                 RefObj->SetStringField(TEXT("AssetClass"), AssetClassName);
             }
 
@@ -468,7 +873,7 @@ TSharedPtr<FJsonObject> UBlueprintEdGraphExportCommandlet::ExportBlueprint(UBlue
             AssetRegistry.GetAssetsByPackageName(DepName, AssetDataList, true);
             if (AssetDataList.Num() > 0)
             {
-                RefObj->SetStringField(TEXT("AssetClass"), AssetDataList[0].AssetClassPath.GetAssetName().ToString());
+                RefObj->SetStringField(TEXT("AssetClass"), PrimaryAssetClassName(AssetDataList));
             }
 
             RefsArray.Add(MakeShared<FJsonValueObject>(RefObj));
@@ -477,211 +882,6 @@ TSharedPtr<FJsonObject> UBlueprintEdGraphExportCommandlet::ExportBlueprint(UBlue
     Root->SetArrayField(TEXT("ReferencedAssets"), RefsArray);
 
     return Root;
-}
-
-TSharedPtr<FJsonObject> UBlueprintEdGraphExportCommandlet::ExportGraph(const UEdGraph* Graph, const FExportOptions& Options) const
-{
-    if (!Graph)
-    {
-        return nullptr;
-    }
-
-    TSharedPtr<FJsonObject> GraphObj = MakeShared<FJsonObject>();
-    GraphObj->SetStringField(TEXT("Name"), Graph->GetName());
-    GraphObj->SetNumberField(TEXT("NodeCount"), Graph->Nodes.Num());
-
-    // bHasLogic = true iff any node has at least one pin with LinkedTo > 0.
-    // Distinguishes a pure-stub graph (e.g. disabled placeholder events, lone FunctionEntry)
-    // from a graph with actual user logic. Lets the lean output stand alone for candidate
-    // filtering without forcing -graphs.
-    bool bHasLogic = false;
-    for (const UEdGraphNode* Node : Graph->Nodes)
-    {
-        if (!Node)
-        {
-            continue;
-        }
-        for (const UEdGraphPin* Pin : Node->Pins)
-        {
-            if (Pin && Pin->LinkedTo.Num() > 0)
-            {
-                bHasLogic = true;
-                break;
-            }
-        }
-        if (bHasLogic)
-        {
-            break;
-        }
-    }
-    GraphObj->SetBoolField(TEXT("HasLogic"), bHasLogic);
-
-    if (!Options.bIncludeGraphs)
-    {
-        return GraphObj;
-    }
-
-    TArray<TSharedPtr<FJsonValue>> NodesArray;
-    for (const UEdGraphNode* Node : Graph->Nodes)
-    {
-        TSharedPtr<FJsonObject> NodeObj = ExportNode(Node);
-        if (NodeObj.IsValid())
-        {
-            NodesArray.Add(MakeShared<FJsonValueObject>(NodeObj));
-        }
-    }
-    GraphObj->SetArrayField(TEXT("Nodes"), NodesArray);
-
-    return GraphObj;
-}
-
-TSharedPtr<FJsonObject> UBlueprintEdGraphExportCommandlet::ExportNode(const UEdGraphNode* Node) const
-{
-    if (!Node)
-    {
-        return nullptr;
-    }
-
-    TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
-
-    NodeObj->SetStringField(TEXT("NodeId"), Node->NodeGuid.ToString());
-    NodeObj->SetStringField(TEXT("Class"), Node->GetClass()->GetName());
-    NodeObj->SetStringField(TEXT("Title"), Node->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
-    NodeObj->SetNumberField(TEXT("PosX"), Node->NodePosX);
-    NodeObj->SetNumberField(TEXT("PosY"), Node->NodePosY);
-
-    if (!Node->NodeComment.IsEmpty())
-    {
-        NodeObj->SetStringField(TEXT("Comment"), Node->NodeComment);
-    }
-
-    if (const UK2Node_Variable* VarNode = Cast<UK2Node_Variable>(Node))
-    {
-        FName VarName = VarNode->VariableReference.GetMemberName();
-        if (!VarName.IsNone())
-        {
-            NodeObj->SetStringField(TEXT("VariableName"), VarName.ToString());
-        }
-        if (UClass* VarOwner = VarNode->VariableReference.GetMemberParentClass())
-        {
-            NodeObj->SetStringField(TEXT("VariableOwner"), VarOwner->GetName());
-        }
-    }
-
-    if (const UK2Node_MacroInstance* MacroNode = Cast<UK2Node_MacroInstance>(Node))
-    {
-        if (UEdGraph* MacroGraph = MacroNode->GetMacroGraph())
-        {
-            NodeObj->SetStringField(TEXT("MacroName"), MacroGraph->GetName());
-            if (UPackage* MacroPkg = MacroGraph->GetOutermost())
-            {
-                NodeObj->SetStringField(TEXT("MacroPackage"), MacroPkg->GetName());
-            }
-        }
-    }
-
-    if (const UK2Node_CallFunction* CallNode = Cast<UK2Node_CallFunction>(Node))
-    {
-        FName FunctionName = CallNode->FunctionReference.GetMemberName();
-        if (!FunctionName.IsNone())
-        {
-            NodeObj->SetStringField(TEXT("FunctionName"), FunctionName.ToString());
-        }
-
-        UClass* MemberParent = CallNode->FunctionReference.GetMemberParentClass();
-        if (MemberParent)
-        {
-            NodeObj->SetStringField(TEXT("FunctionOwner"), MemberParent->GetName());
-        }
-    }
-
-    if (const UK2Node_DynamicCast* CastNode = Cast<UK2Node_DynamicCast>(Node))
-    {
-        if (CastNode->TargetType)
-        {
-            NodeObj->SetStringField(TEXT("CastTarget"), CastNode->TargetType->GetPathName());
-        }
-    }
-
-    if (const UK2Node_Event* EventNode = Cast<UK2Node_Event>(Node))
-    {
-        FName EventName = EventNode->EventReference.GetMemberName();
-        if (!EventName.IsNone())
-        {
-            NodeObj->SetStringField(TEXT("EventName"), EventName.ToString());
-        }
-    }
-
-    TArray<TSharedPtr<FJsonValue>> PinsArray;
-    for (const UEdGraphPin* Pin : Node->Pins)
-    {
-        if (Pin->bHidden)
-        {
-            continue;
-        }
-
-        TSharedPtr<FJsonObject> PinObj = ExportPin(Pin);
-        if (PinObj.IsValid())
-        {
-            PinsArray.Add(MakeShared<FJsonValueObject>(PinObj));
-        }
-    }
-    NodeObj->SetArrayField(TEXT("Pins"), PinsArray);
-
-    return NodeObj;
-}
-
-TSharedPtr<FJsonObject> UBlueprintEdGraphExportCommandlet::ExportPin(const UEdGraphPin* Pin) const
-{
-    if (!Pin)
-    {
-        return nullptr;
-    }
-
-    TSharedPtr<FJsonObject> PinObj = MakeShared<FJsonObject>();
-
-    PinObj->SetStringField(TEXT("Name"), Pin->PinName.ToString());
-    PinObj->SetStringField(TEXT("Direction"), Pin->Direction == EGPD_Input ? TEXT("Input") : TEXT("Output"));
-    PinObj->SetStringField(TEXT("Type"), Pin->PinType.PinCategory.ToString());
-
-    if (Pin->PinType.PinSubCategoryObject.IsValid())
-    {
-        PinObj->SetStringField(TEXT("SubType"), Pin->PinType.PinSubCategoryObject->GetName());
-    }
-
-    if (!Pin->DefaultValue.IsEmpty())
-    {
-        PinObj->SetStringField(TEXT("Default"), Pin->DefaultValue);
-    }
-
-    if (!Pin->DefaultTextValue.IsEmpty())
-    {
-        PinObj->SetStringField(TEXT("DefaultText"), Pin->DefaultTextValue.ToString());
-    }
-
-    if (Pin->DefaultObject)
-    {
-        PinObj->SetStringField(TEXT("DefaultObject"), Pin->DefaultObject->GetPathName());
-    }
-
-    if (Pin->LinkedTo.Num() > 0)
-    {
-        TArray<TSharedPtr<FJsonValue>> LinksArray;
-        for (const UEdGraphPin* LinkedPin : Pin->LinkedTo)
-        {
-            if (LinkedPin && LinkedPin->GetOwningNode())
-            {
-                TSharedPtr<FJsonObject> LinkObj = MakeShared<FJsonObject>();
-                LinkObj->SetStringField(TEXT("NodeId"), LinkedPin->GetOwningNode()->NodeGuid.ToString());
-                LinkObj->SetStringField(TEXT("NodeTitle"), LinkedPin->GetOwningNode()->GetNodeTitle(ENodeTitleType::FullTitle).ToString());
-                LinkObj->SetStringField(TEXT("PinName"), LinkedPin->PinName.ToString());
-                LinksArray.Add(MakeShared<FJsonValueObject>(LinkObj));
-            }
-        }
-        PinObj->SetArrayField(TEXT("LinkedTo"), LinksArray);
-    }
-
-    return PinObj;
 }
 
 void UBlueprintEdGraphExportCommandlet::ExportPropertyOverrides(UObject* Instance, TArray<TSharedPtr<FJsonValue>>& OutArray) const
@@ -716,9 +916,8 @@ void UBlueprintEdGraphExportCommandlet::ExportPropertyOverridesCompare(UObject* 
             continue;
         }
 
-        // When Reference is a base-class CDO (e.g. AActor CDO vs a BP-class CDO), the
-        // iterator surfaces properties owned by Instance subclasses. Reading those off
-        // Reference triggers a hard assertion in ContainerPtrToValuePtr. Guard here.
+        // With Reference a base-class CDO the iterator surfaces properties owned by Instance subclasses,
+        // and reading those off Reference asserts inside ContainerPtrToValuePtr.
         UClass* PropOwner = Prop->GetOwner<UClass>();
         if (PropOwner && !Reference->GetClass()->IsChildOf(PropOwner))
         {

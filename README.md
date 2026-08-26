@@ -14,9 +14,9 @@ An editor plugin that lets scripts and AI agents operate on Unreal Engine 5 uass
 | --- | --- |
 | Can't read | Logic and configuration are locked inside binary `.uasset` files, and an AI handed the file has nowhere to start. An EventGraph with hundreds of nodes has no readable text form, and abandoned variables, broken connections, wrong defaults are impossible to fully audit by eye in the editor. Montage notify timing, UMG hierarchy and keyframes, Niagara and material parameters, DataTable values, level actor placement and streaming config all exist only in the editor UI |
 | Can't write | Changing a UMG layout means dragging by hand in the editor, there is no version-controllable, replayable write path |
-| Can't change what exists | Adding a component to a Blueprint, wiring it into the graph and setting its default are three separate hand edits, and doing that across many Blueprints means doing it many times |
+| Can't change what exists | Adding a component to a Blueprint, wiring it into the graph and setting its default are three separate hand edits, and doing that across many Blueprints means doing it many times. An animation state machine is the same story one level up, states, conduits, transitions and their rule graphs are all mouse work |
 | Can't fix after a rename | After a C++ or asset rename, CoreRedirects only fixes the call side. It cannot fix the implementation side or the consumer side inside Blueprint graphs, nor another level's import of the old path |
-| Can't audit | Broken references, level streaming topology, per-level component budget have no batch query entry point |
+| Can't audit | Broken references, level streaming topology, per-level component budget, texture compression and sRGB settings, material usage flags and Nanite compatibility have no batch query entry point |
 
 Five problems, five capability groups.
 
@@ -26,9 +26,9 @@ Five problems, five capability groups.
 | --- | --- | --- | --- |
 | Export | Read uasset structure, write JSON | JSON under `Intermediate/UAssetExport` | 11 |
 | Import | Read a JSON spec, write back to or create uassets | modified or new uassets | 3 |
-| Edit | Change an existing uasset to match an intent | modified uassets | 2 |
-| Migrate | Fix references after a C++ or asset rename | modified uassets | 6 |
-| Audit | Read-only checks producing a report | report JSON | 2 |
+| Edit | Change an existing uasset to match an intent | modified uassets | 4 |
+| Migrate | Fix references after a C++ or asset rename | modified uassets | 7 |
+| Audit | Read-only checks producing a report | report JSON | 4 |
 
 The group is decided by the run name: suffix `Export` is the Export group, suffix `Import` and prefix `Create` are the Import group, prefix `Edit` is the Edit group, prefix `Audit` is the Audit group, everything else is Migrate. Naming-wise `Import` and `Export` are nouns used as suffixes, every other verb leads.
 
@@ -38,12 +38,27 @@ Every operation converges on the same calling contract. The heartbeat file `Save
 
 | Editor state | Which path | Feedback |
 | --- | --- | --- |
-| Open | Write a pending task, the in-editor subsystem runs it in-process | Export raises a bottom-right toast, the rest goes to the Message Log |
+| Open | Write a pending task, the in-editor subsystem runs it in-process | One Message Log page per run, a toast when that run reports warnings or errors |
 | Closed | Launch `UnrealEditor-Cmd` to run the commandlet | log |
 
 Both paths produce identical output, the caller does not need to care whether the editor is open.
 
-What the routing buys: the four groups share one call entry and one output convention, so workflows compose, export the structure, analyze offline, write back to the asset, audit to verify, instead of every added tool bringing its own way of being called. Adding a commandlet adds a capability, the contract does not change.
+What the routing buys: the five groups share one call entry and one output convention, so workflows compose, export the structure, analyze offline, write back to the asset, audit to verify, instead of every added tool bringing its own way of being called. Adding a commandlet adds a capability, the contract does not change.
+
+## Calling contract
+
+Every commandlet returns one of four codes, from a single enum, and the in-editor queue passes the code through unchanged.
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success |
+| 1 | Failure, bad arguments, an asset that would not load, a value that would not write |
+| 2 | The editor is running, the commandlet path steps aside rather than competing with it |
+| 3 | The run itself succeeded and the report has findings, Audit group only |
+
+3 is not a failure, which is what makes an audit usable as a commit gate.
+
+Writes are all-or-nothing per target. A writer that fails aborts its whole target before anything reaches disk, and a Blueprint that fails to compile is never saved. Nodes the plugin creates carry `RF_Transactional`, so an edited asset opens in the editor without the "requires resave" toast.
 
 ## Quick start
 
@@ -58,7 +73,7 @@ run_commandlet.sh <UE_PATH> <UPROJECT> <RunName> <AssetList> [IDLE_SEC] [MAX_SEC
 | `UE_PATH` | Engine install root |
 | `UPROJECT` | Absolute path to the `.uproject` |
 | `RunName` | The commandlet's run name |
-| `AssetList` | Comma-separated asset paths, the Audit group ignores it, pass an empty string |
+| `AssetList` | Comma-separated asset paths, spec-driven runs pass an empty string |
 | `IDLE_SEC` | Output mtime quiet seconds the Export group uses to decide completion, default 10 |
 | `MAX_SEC` | Total wait cap, default 600 |
 | `EXTRA_ARGS` | Passed through to the commandlet |
@@ -105,7 +120,7 @@ Audit.
 ```bash
 MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
     "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject" \
-    AuditLevelReference "" 10 600 \
+    AuditTexture "" 10 600 \
     '-scandir="/Game"'
 ```
 
@@ -116,8 +131,8 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
 
 | RunName | What it exports |
 | --- | --- |
-| `BlueprintEdGraphExport` | Blueprint graphs, nodes, pins, connections, variables, components, referenced assets |
-| `AnimMontageExport` | Montage sections, slots, ANS/AN placement and duration, notify custom parameters |
+| `BlueprintEdGraphExport` | Blueprint graphs, nodes, pins, connections, function signatures, variables, dispatchers, timelines, components, referenced assets |
+| `AnimAssetExport` | AnimSequence and AnimMontage notifies, curves, track names, root motion, sync markers on a sequence, sections and slots on a montage |
 | `WidgetLayoutExport` | Widget tree, slot layout properties, subclass properties, animation keyframes, EdGraph |
 | `DataAssetExport` | All custom properties of DataAsset subclasses, array elements expanded |
 | `DataTableExport` | DataTable row struct name and all row data, indexed by RowName |
@@ -125,19 +140,32 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
 | `MaterialExport` | Material expression connection chain and global settings, MaterialInstance parameter overrides |
 | `TextureExport` | Texture properties, compression, sRGB, LOD group, mips, source dimensions |
 | `BehaviorTreeExport` | BT tree structure, node parameters, Blackboard keys |
-| `AnimBlueprintExport` | AnimBP EdGraph, state machine states, transitions, conditions, blend settings |
+| `AnimBlueprintExport` | AnimBP EdGraph, state machines, states, transitions, blend settings, entry state, event bindings |
 | `LevelExport` | Level actors / components, delta-from-archetype properties, collision / static mesh / ISM summary, streaming levels |
 
-Output: `Intermediate/UAssetExport/<AssetPath>.json`, out of version control.
+Output: `Intermediate/UAssetExport/<AssetPath>_r<revision>_<YYYYMMDD-HHMMSS>.json`, out of version control.
+
+`revision` is the asset's last-changed revision in version control. The stamped name is written only after the export succeeds, so two exports of the same asset never overwrite each other and a stale export is never mistaken for a fresh one. Read the newest.
 
 Every JSON carries the two common fields `ExporterVersion` and `ExportType`, the rest expands per asset type.
+
+One EdGraph serializer backs `BlueprintEdGraphExport`, `AnimBlueprintExport` and `WidgetLayoutExport`, so the graph, node and pin keys are identical across all three and the same graph exported through two commandlets diffs clean.
+
+| Addition | What it gives the reader |
+| --- | --- |
+| `Signature` on every function-class graph | Inputs, outputs, local variables, access, flags, in the exact shape `EditBlueprint` takes back as a spec |
+| Variable metadata, `EventDispatchers[]`, `Timelines[]` | The parts of a Blueprint that live outside the graphs |
+| Anim node `Settings` / `Bindings` / `ExposedPins` | What the Details panel shows, not only what the pins show |
+| `RuleSummary` per transition | One line saying what lets that transition fire, so a state machine reads without expanding every rule graph |
+| AnimAsset curves, sync markers, track names, root motion, montage blend | Timing data that used to exist only in the editor timeline |
+| Texture and material property blocks | The build settings the Edit and Audit groups act on |
 
 <details>
 <summary>Blueprint EdGraph</summary>
 
 ```json
 {
-    "ExporterVersion": "2.0.0",
+    "ExporterVersion": "2.4.0",
     "ExportType": "BlueprintEdGraph",
     "Blueprint": "BP_Foo",
     "ParentClass": "PlayerController",
@@ -149,6 +177,7 @@ Every JSON carries the two common fields `ExporterVersion` and `ExportType`, the
             "GraphType": "EventGraph",
             "Nodes": [
                 {
+                    "NodeId": "630182DA4D53F4141AD5B792F2AA8565",
                     "Class": "K2Node_CallFunction",
                     "Title": "Open Level (by Object Reference)",
                     "FunctionName": "OpenLevelBySoftObjectPtr",
@@ -162,13 +191,13 @@ Every JSON carries the two common fields `ExporterVersion` and `ExportType`, the
 </details>
 
 <details>
-<summary>AnimMontage</summary>
+<summary>AnimAsset</summary>
 
 ```json
 {
-    "ExporterVersion": "2.0.0",
+    "ExporterVersion": "2.4.0",
     "ExportType": "AnimMontage",
-    "MontageName": "AM_Foo_Attack_01",
+    "AssetName": "AM_Foo_Attack_01",
     "SequenceLength": 0.543,
     "Sections": [
         { "Name": "Default", "StartTime": 0 }
@@ -181,11 +210,20 @@ Every JSON carries the two common fields `ExporterVersion` and `ExportType`, the
             ]
         }
     ],
+    "Curves": [
+        {
+            "Name": "Windup",
+            "Flags": [ "Editable" ],
+            "KeyCount": 2,
+            "Keys": [ { "Time": 0.0, "Value": 0.0 }, { "Time": 0.5, "Value": 1.0 } ]
+        }
+    ],
     "Notifies": [
         {
             "NotifyName": "ANS_Example",
             "TriggerTime": 0.0001,
             "Duration": 0.122,
+            "TrackIndex": 0,
             "IsState": true,
             "NotifyClass": "AnimNotifyState_Example",
             "Parameters": {
@@ -196,6 +234,49 @@ Every JSON carries the two common fields `ExporterVersion` and `ExportType`, the
     ]
 }
 ```
+
+`Parameters` goes straight back into `EditAnimAsset` once edited.
+</details>
+
+<details>
+<summary>AnimBlueprint state machine</summary>
+
+```json
+{
+    "ExporterVersion": "2.4.0",
+    "ExportType": "AnimBlueprint",
+    "StateMachines": [
+        {
+            "StateMachineName": "Locomotion",
+            "EntryState": "Idle",
+            "States": [
+                {
+                    "StateName": "Idle",
+                    "StateType": "AST_SingleState",
+                    "Events": { "UpdateFunction": "TickIdle" }
+                },
+                { "StateName": "Airborne", "StateType": "Conduit" }
+            ],
+            "Transitions": [
+                {
+                    "FromState": "Idle",
+                    "ToState": "Walk",
+                    "CrossfadeDuration": 0.2,
+                    "LogicType": "TLT_Inertialization",
+                    "RuleSummary": {
+                        "Getter": "GetRelevantAnimTimeRemainingFraction",
+                        "State": "Idle",
+                        "Compare": "Less",
+                        "Threshold": "0.1"
+                    }
+                }
+            ]
+        }
+    ]
+}
+```
+
+The transition keys are the ones `EditBlueprint` reads under `StateMachines`, so an exported transition pastes back as a spec.
 </details>
 
 <details>
@@ -203,7 +284,7 @@ Every JSON carries the two common fields `ExporterVersion` and `ExportType`, the
 
 ```json
 {
-    "ExporterVersion": "2.0.0",
+    "ExporterVersion": "2.4.0",
     "ExportType": "WidgetLayout",
     "WidgetBlueprint": "WBP_Foo",
     "WidgetTree": {
@@ -235,7 +316,7 @@ Every JSON carries the two common fields `ExporterVersion` and `ExportType`, the
 
 ```json
 {
-    "ExporterVersion": "2.0.0",
+    "ExporterVersion": "2.4.0",
     "ExportType": "DataTable",
     "DataTableName": "DT_Foo",
     "RowStruct": "AttributeMetaData",
@@ -262,13 +343,15 @@ Every JSON carries the two common fields `ExporterVersion` and `ExportType`, the
 
 ```json
 {
-    "ExporterVersion": "2.0.0",
+    "ExporterVersion": "2.4.0",
     "ExportType": "Material",
     "MaterialName": "M_Foo",
     "ShadingModel": "MSM_DefaultLit",
     "BlendMode": "BLEND_Translucent",
     "TwoSided": false,
     "MaterialDomain": "MD_Surface",
+    "bAutomaticallySetUsageInEditor": true,
+    "UsageFlags": [ "bUsedWithSkeletalMesh", "bUsedWithNanite" ],
     "Expressions": [
         {
             "Class": "MaterialExpressionMaterialFunctionCall",
@@ -312,7 +395,7 @@ MaterialInstance exports the parameter override table.
 
 ```json
 {
-    "ExporterVersion": "2.0.0",
+    "ExporterVersion": "2.4.0",
     "ExportType": "Level",
     "LevelName": "L_Foo",
     "WorldSettings": {
@@ -362,7 +445,7 @@ ISM / HISM / Foliage components with more than 200 instances export only the cou
 
 ```json
 {
-    "ExporterVersion": "2.0.0",
+    "ExporterVersion": "2.4.0",
     "ExportType": "NiagaraSystem",
     "SystemName": "NS_Foo",
     "ExposedParameters": [],
@@ -526,41 +609,78 @@ Material node graphs are out of reach. `CreateAsset` produces an empty material,
 </details>
 
 <details>
-<summary><b>Edit</b>, 2 commandlets</summary>
+<summary><b>Edit</b>, 4 commandlets</summary>
 
-Import regenerates an asset from a spec. Edit changes one that already exists, one writer per facet. `EditBlueprint` splits along the same facets the editor's own Blueprint diff splits a Blueprint into, `EditAnimMontage` covers a montage's notifies.
+Import regenerates an asset from a spec. Edit changes one that already exists, one writer per facet. This is where the plugin does the most, and what lets an agent hand back a change rather than a description of one.
+
+| RunName | What it edits | Default |
+| --- | --- | --- |
+| `EditBlueprint` | Components, variables, defaults, functions, dispatchers, interfaces, state machines, graph, layout | dry run |
+| `EditAnimAsset` | AnimSequence and AnimMontage notifies and curves, sync markers on a sequence, sections and slots on a montage | dry run |
+| `EditTextureAsset` | Texture2D build settings | dry run |
+| `EditMaterialAsset` | Material usage flags and base settings, MaterialInstanceConstant parent and parameter overrides | dry run |
+
+Dry run is not a preview. Without `-apply` every writer still runs against the real asset and only the save is skipped, so a clean dry run means the spec validated for real. The changes die with the process.
+
+**EditBlueprint**
+
+Nine writers, split along the same facets the editor's own Blueprint diff splits a Blueprint into.
 
 | Spec key | Diff mode it mirrors | What it writes |
 | --- | --- | --- |
 | `Components` | `ComponentsMode` | SimpleConstructionScript component tree |
-| `Variables` | `MyBlueprintMode` | member variables |
-| `Defaults` | `DefaultsMode` | CDO and component template property values |
-| `Graph` | `GraphMode` | nodes, pin defaults, connections |
+| `Variables` | `MyBlueprintMode` | member variables, `Modify` retypes an existing one |
+| `Defaults` | `DefaultsMode` | CDO and component template values, reaching components inherited from a parent Blueprint |
+| `Functions` | `MyBlueprintMode` | function graphs, signature, local variables, access and flags |
+| `Dispatchers` | `MyBlueprintMode` | event dispatchers and their signature graph |
+| `Interfaces` | `ClassSettingsMode` | implemented interfaces |
+| `StateMachines` | `GraphMode` | state machines, states, conduits, aliases, transitions |
+| `Graph` | `GraphMode` | nodes, node properties, bindings, exposed pins, pin defaults, connections |
 | `Layout` | none, purely cosmetic | node positions |
 
-| RunName | What it does | Default |
-| --- | --- | --- |
-| `EditBlueprint` | Applies every facet the spec names to one Blueprint | dry run |
-| `EditAnimMontage` | Adds, modifies and removes the notifies the spec names on one AnimMontage | dry run |
-
-One target loads the asset once, runs every writer the spec names, then compiles and saves once. A writer that fails aborts the whole target before anything is written, so a Blueprint never lands half-edited.
-
-Writers run in a fixed order regardless of key order in the spec, because each depends on the last.
+One target loads the asset once, runs every writer the spec names, then compiles and saves once. Writers run in a fixed order regardless of key order in the spec, because each depends on the last.
 
 ```
-Components -> Variables -> Defaults -> Graph -> Layout
+Components -> Variables -> Defaults -> Functions -> Dispatchers -> Interfaces -> StateMachines -> Graph -> Layout
 ```
 
-`Graph` can reference components and variables the earlier writers made, and `Layout` addresses nodes by the Id `Graph` gave them. That dependency is why these are one commandlet rather than five.
+`Graph` can reference the components, variables and function entry points the earlier writers made, and `Layout` addresses nodes by the Id `Graph` gave them. That dependency is why these are one commandlet rather than nine.
 
-Nodes are addressed by Id. A node the spec creates takes whatever Id the spec gave it, a node that already exists takes the 32-hex NodeId `BlueprintEdGraphExport -graphs` prints, and both live in one namespace, so a new node can be wired straight onto an existing one. Connections go through `UEdGraphSchema_K2::TryCreateConnection`, which validates and inserts conversion nodes exactly as dragging a wire in the editor does.
+| Facet | What it reaches |
+| --- | --- |
+| `Graph` nodes | 25 node types, from `CallFunction` and `Branch` through `DynamicCast`, `MakeStruct` / `BreakStruct`, the four `Switch` kinds, `SpawnActor`, `Timeline`, `MathExpression` and `AnimGetter`. A `Type` starting with `/` is read as a class path, which is how anim graph nodes get built. A `Type` outside the table resolves as a StandardMacros graph name, so `Gate` and `DoOnce` need no ceremony |
+| `Graph` `Bind` | Property-access bindings on anim nodes, the Bind dropdown in the Details panel. Aimed at a transition's Id it binds that transition's result |
+| `Graph` `ExposePins` | Shows or hides the pin for an anim node property, addressed by name rather than by array index |
+| `StateMachines` | Ten ops, `Add` / `AddState` / `AddConduit` / `AddAlias` / `AddTransition` / `ModifyState` / `ModifyTransition` / `RenameState` / `RemoveState` / `RemoveTransition`. Keys match what `AnimBlueprintExport` prints, so an exported state or transition pastes back as a spec |
+| `Functions` | `Add` / `Rename` / `Modify` / `Remove`, with a `Signature` block carrying inputs, outputs, local variables, purity, access and category, in the shape the export prints |
+| `Layout` | `Arrange` reads the graph's own topology and knows three kinds, K2 exec chains, pose graphs, state machines. `Straighten` is the editor's Q |
 
-`Layout` carries `Arrange`, which lays a graph out from its topology so no coordinate has to be written by hand, and `Straighten`, which is the editor's Q. Slate has measured nothing in a headless run, so node extents come from title lines and pin rows rather than off a widget.
+Nodes are addressed by Id. A node the spec creates takes whatever Id the spec gave it, a node that already exists takes the 32-hex NodeId `BlueprintEdGraphExport -graphs` prints, and both live in one namespace, so a new node can be wired straight onto an existing one. Addressing recurses into subgraphs, so a node inside a state's pose graph is reachable without switching graphs first. Connections go through `UEdGraphSchema_K2::TryCreateConnection`, which validates and inserts conversion nodes exactly as dragging a wire in the editor does.
+
+Slate has measured nothing in a headless run, so `Layout` estimates node extents from title lines and pin rows rather than reading them off a widget, with a separate estimate per widget family, states and conduits, anim nodes, comment boxes.
+
+**EditAnimAsset**
+
+| Spec key | What it writes |
+| --- | --- |
+| `Notifies` | AnimNotify and AnimNotifyState add / modify / remove, including track placement and reflected parameters |
+| `Curves` | Float curve add / rename / remove and keyframe writes, through the animation data model controller |
+| `SyncMarkers` | Authored sync markers, AnimSequence only |
+| `Sections` | Montage sections and the `NextSection` chain, AnimMontage only |
+| `Slots` | Montage slots and their segments, AnimMontage only |
+
+Order is fixed at `Slots` -> `Sections` -> `Curves` -> `SyncMarkers` -> `Notifies`, because slots decide the montage length every later time field is validated against.
+
+**EditTextureAsset and EditMaterialAsset**
+
+Both consume the `Spec` block their audit emits verbatim, so `AuditTexture` into `EditTextureAsset` and `AuditMaterial` into `EditMaterialAsset` are a find-then-fix pair with no translation step in between.
+
+`EditTextureAsset` writes 17 build settings, LOD group, compression, sRGB, mip generation, size cap, streaming, virtual texturing, filtering and addressing. `EditMaterialAsset` writes all 23 usage flags plus blend mode, domain, shading model, two-sided and opacity mask clip value on a base material, and parent, scalar / vector / texture / static switch parameters and base property overrides on an instance. Material node graphs stay out of scope, Python's `unreal.MaterialEditingLibrary` covers those.
 
 </details>
 
 <details>
-<summary><b>Migrate</b>, 6 commandlets</summary>
+<summary><b>Migrate</b>, 7 commandlets</summary>
 
 CoreRedirects covers the call side only, the implementation side and the consumer side inside Blueprint graphs are out of its range. A renamed interface event degrades a BP override into an orphaned custom event and the event stops firing, a renamed delegate parameter leaves a dangling pin on the binding node. Both still compile, and neither is findable by eye in a large project.
 
@@ -568,12 +688,13 @@ CoreRedirects covers the call side only, the implementation side and the consume
 | --- | --- | --- |
 | `RedirectBlueprintEvent` | Reconnects a BP override that degraded into a custom event back to the new event, carrying its wiring across, and recognizes the `_N` dedup suffix UE appends | dry run |
 | `RedirectBlueprintPin` | Moves a binding node's wiring from the old output pin to the new pin, then reconstructs the node to drop the old pin, touching only nodes that carry both the old and the new pin | dry run |
+| `DeleteBlueprintNode` | Deletes graph nodes by node id, the cleanup step after graph logic moves into C++. Connections are cut, not rerouted, and nodes the schema refuses to delete are reported and skipped | dry run |
 | `ReparentBlueprint` | Changes a Blueprint's parent class | writes directly |
 | `ResaveAsset` | Forces load, compile, save so load-time fixups land on disk, after which that CoreRedirect can be dropped, supports Blueprint and map | writes directly |
 | `SanitizeLevelReference` | Repoints every reference to an old asset inside a level at the new asset, then resaves that level | writes directly, `-dryrun` only counts |
 | `DuplicateAsset` | Copies assets to new paths, the copy is independent and nothing is retargeted, and an existing destination is an error rather than an overwrite | dry run |
 
-Both redirects scan only by default, listing each Blueprint, event or node hit and how many wire groups would move, then take `-apply` to compile and save once it looks right. A scan with zero hits warns, check the `-OwnerClass` and the old name spelling first.
+The scanning commandlets list each Blueprint, event or node hit and how many wire groups would move, then take `-apply` to compile and save once it looks right. A scan with zero hits warns, check the `-OwnerClass` and the old name spelling first. Node ids for `DeleteBlueprintNode` are copied verbatim out of a `BlueprintEdGraphExport -graphs` output, and ids that matched nothing are reported at the end rather than passing silently.
 
 `SanitizeLevelReference` must run before the old asset is deleted. Repointing needs both the old and the new on disk, running it after the delete is too late.
 
@@ -582,16 +703,20 @@ Modified uassets show up in the version control working copy afterwards.
 </details>
 
 <details>
-<summary><b>Audit</b>, 2 commandlets and 3 scripts</summary>
+<summary><b>Audit</b>, 4 commandlets and 3 scripts</summary>
 
 | RunName | What it checks |
 | --- | --- |
 | `AuditLevelReference` | References inside level packages pointing at assets that no longer exist |
 | `AuditLevelTopology` | Streaming relationships between levels, which one is persistent, which one is a sublevel |
+| `AuditTexture` | Whether a texture's build settings match how it is actually sampled, rules T1 to T15 |
+| `AuditMaterial` | Nanite compatibility and usage flags against actual application, rules N1 to N9 and U1 to U4 |
 
-`AuditLevelReference` walks the Asset Registry dependency graph and checks package existence one by one, it does not load worlds and saves no package. Existence resolves against the mounted content roots, so every plugin of the project must be enabled before the run, otherwise dependencies under an unmounted root come back as false breakage. Its paired operation is `SanitizeLevelReference` in the Migrate group, audit finds the breakage, sanitize fixes it.
+All four are read-only and save no package. Exit code 3 means the run worked and the report has findings, which is what a commit gate keys on.
 
-`AuditLevelTopology` assigns every level a role.
+**AuditLevelReference** walks the Asset Registry dependency graph and checks package existence one by one, it does not load worlds. Existence resolves against the mounted content roots, so every plugin of the project must be enabled before the run, otherwise dependencies under an unmounted root come back as false breakage. Its paired operation is `SanitizeLevelReference` in the Migrate group, audit finds the breakage, sanitize fixes it.
+
+**AuditLevelTopology** assigns every level a role.
 
 | Role | Test |
 | --- | --- |
@@ -600,6 +725,19 @@ Modified uassets show up in the version control working copy afterwards.
 | `Sublevel` | No streaming levels, but referenced by another level |
 
 Hosting outranks being hosted, a level that carries sublevels of its own is `PersistentHost` even when something else streams it in. The test is whether the level can be opened on its own to drive its sublevels, a copy of it living inside another level does not take that away, and `referenced_by` still records the nesting. Tools that need to drive streaming find the persistent level from this report instead of hardcoding a name into the script.
+
+**AuditTexture** runs 15 rules over compression, sRGB, LOD group, mip generation, power-of-two, size budget, streaming and virtual texturing. The sampler rules do not reimplement the engine's opinion, they call `UMaterialExpressionTextureBase::VerifySamplerType`, the same check the material editor shows. Use is classified by walking the Asset Registry reverse graph from texture to material to instance to mesh / widget / Niagara, up to four hops, into UI / Character / Prop / World / VFX, which is what lets a rule say a UI texture is not in the UI group. Two passes keep it cheap, Asset Registry tags answer most rules and only the ones that need pixels load the texture.
+
+**AuditMaterial** runs the Nanite rules N1 to N9 and the usage-flag rules U1 to U4, the latter comparing every `bUsedWith*` against what the material is actually applied to. Each base material also gets a `Cost` block, domain, blend mode, connected outputs, referenced texture count, expression and function counts, and a `Permutation` block, usage flag count multiplied by quality levels multiplied by static switch combinations. `PIEWarmup` ranks the materials those numbers say will make someone wait, and says so plainly when nothing qualifies. `-stats` adds a second tier, compiling representative shaders headless for sampler counts, texture sample counts and instruction counts, at tens of seconds to minutes per material.
+
+Both audits emit a `Spec` block in the report, already in the shape their Edit counterpart consumes. Only rules with a determinate expected value go in, so an art decision such as a blend mode is reported and never auto-changed.
+
+```bash
+MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
+    "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject" \
+    EditTextureAsset "" 10 600 \
+    '-spec="C:/temp/texture_spec.json" -apply'
+```
 
 Three companion scripts.
 
@@ -628,7 +766,7 @@ The exported JSON can be very large, a Blueprint of moderate complexity already 
 2. Read by line range once you have the line numbers, do not pull the whole file into context
 
 ```bash
-grep -n "OnHealthChanged" Intermediate/UAssetExport/Game/Blueprints/BP_Foo.json
+grep -n "OnHealthChanged" Intermediate/UAssetExport/Game/Blueprints/BP_Foo_r*.json
 ```
 
 ## Why not the official toolchain
@@ -660,12 +798,12 @@ Prerequisites: Unreal Engine 5.7, and the plugin must be compiled with the proje
 
 | Doc | Contents |
 | --- | --- |
-| `Docs/AI-Guide.md` | Call manual for AI agents, decision table plus call templates plus common pitfalls |
-| `Docs/Export.md` | Export group detail |
-| `Docs/Import.md` | Import group detail and spec format |
-| `Docs/Edit.md` | Edit group detail, every spec key and every layout op |
-| `Docs/Migrate.md` | Migrate group detail |
-| `Docs/Audit.md` | Audit group detail and the stream metric workflow |
+| `Docs/AI-Guide.md` | Call manual for AI agents, a decision table covering every capability, call templates, common pitfalls |
+| `Docs/Export.md` | Export group, 11 commandlets, every JSON field |
+| `Docs/Import.md` | Import group, 3 commandlets, spec format |
+| `Docs/Edit.md` | Edit group, 4 commandlets, every spec key and every layout op |
+| `Docs/Migrate.md` | Migrate group, 7 commandlets |
+| `Docs/Audit.md` | Audit group, 4 commandlets, full rule tables, stream metric workflow |
 
 These docs are reference material for agents to read. Where behavior and documentation disagree, the source wins, the block comment at the top of each commandlet header carries the full contract.
 
@@ -681,7 +819,7 @@ UE is only the proving ground, the three reusable parts do not depend on it.
 
 ## Version
 
-Current version: **2.3.2**
+Current version: **2.4.0**
 
 Defined in `src/Source/UAssetWorkbench/Public/UAssetWorkbenchVersion.h`, and embedded in the `ExporterVersion` field of every exported JSON.
 

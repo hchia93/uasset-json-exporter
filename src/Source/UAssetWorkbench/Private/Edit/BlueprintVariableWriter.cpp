@@ -3,138 +3,102 @@
 
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "Engine/Blueprint.h"
+#include "Engine/SCS_Node.h"
+#include "Engine/SimpleConstructionScript.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "Misc/ConfigCacheIni.h"
+#include "UObject/UnrealType.h"
 
 namespace
 {
-    // Spec type word to pin category. Names follow what the editor's variable type dropdown shows,
-    // not the PC_ constants, so a spec reads like the UI it replaces.
-    bool ResolvePinCategory(const FString& Type, FName& OutCategory, FName& OutSubCategory)
+    const TCHAR* kDialogSection = TEXT("SuppressableDialogs");
+    const TCHAR* kTypeChangeDialogKey = TEXT("ChangeVariableType_Warning");
+
+    // ChangeMemberVariableType raises a modal as soon as any node reads the variable, and neither a
+    // commandlet nor the queue can answer it. Suppressed up front, user setting restored after.
+    class FScopedTypeChangePrompt
     {
-        OutSubCategory = NAME_None;
-
-        static const TMap<FString, FName> Simple =
+    public:
+        FScopedTypeChangePrompt()
         {
-            { TEXT("bool"),        UEdGraphSchema_K2::PC_Boolean },
-            { TEXT("byte"),        UEdGraphSchema_K2::PC_Byte },
-            { TEXT("enum"),        UEdGraphSchema_K2::PC_Byte },
-            { TEXT("int"),         UEdGraphSchema_K2::PC_Int },
-            { TEXT("int64"),       UEdGraphSchema_K2::PC_Int64 },
-            { TEXT("string"),      UEdGraphSchema_K2::PC_String },
-            { TEXT("name"),        UEdGraphSchema_K2::PC_Name },
-            { TEXT("text"),        UEdGraphSchema_K2::PC_Text },
-            { TEXT("object"),      UEdGraphSchema_K2::PC_Object },
-            { TEXT("class"),       UEdGraphSchema_K2::PC_Class },
-            { TEXT("softobject"),  UEdGraphSchema_K2::PC_SoftObject },
-            { TEXT("softclass"),   UEdGraphSchema_K2::PC_SoftClass },
-            { TEXT("struct"),      UEdGraphSchema_K2::PC_Struct },
-        };
-
-        if (const FName* Found = Simple.Find(Type))
-        {
-            OutCategory = *Found;
-            return true;
+            m_bHadSetting = GConfig->GetBool(kDialogSection, kTypeChangeDialogKey, m_bPreviousSetting, GEditorPerProjectIni);
+            GConfig->SetBool(kDialogSection, kTypeChangeDialogKey, true, GEditorPerProjectIni);
         }
 
-        // Floats are PC_Real plus a width subcategory, "float" alone would land on a wildcard width.
-        if (Type == TEXT("float") || Type == TEXT("real"))
+        ~FScopedTypeChangePrompt()
         {
-            OutCategory = UEdGraphSchema_K2::PC_Real;
-            OutSubCategory = UEdGraphSchema_K2::PC_Float;
-            return true;
-        }
-
-        if (Type == TEXT("double"))
-        {
-            OutCategory = UEdGraphSchema_K2::PC_Real;
-            OutSubCategory = UEdGraphSchema_K2::PC_Double;
-            return true;
-        }
-
-        return false;
-    }
-
-    bool ResolveContainerType(const FString& Container, EPinContainerType& OutContainer)
-    {
-        if (Container.IsEmpty() || Container == TEXT("None"))
-        {
-            OutContainer = EPinContainerType::None;
-            return true;
-        }
-        if (Container == TEXT("Array"))
-        {
-            OutContainer = EPinContainerType::Array;
-            return true;
-        }
-        if (Container == TEXT("Set"))
-        {
-            OutContainer = EPinContainerType::Set;
-            return true;
-        }
-        if (Container == TEXT("Map"))
-        {
-            OutContainer = EPinContainerType::Map;
-            return true;
-        }
-
-        return false;
-    }
-
-    bool BuildPinType(const FBlueprintEditContext& Context, const TSharedPtr<FJsonObject>& Desc, FEdGraphPinType& OutType)
-    {
-        FString Type;
-        if (!Desc->TryGetStringField(TEXT("Type"), Type))
-        {
-            UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: variable Add needs a Type"), *Context.AssetPath);
-            return false;
-        }
-
-        FName Category;
-        FName SubCategory;
-        if (!ResolvePinCategory(Type, Category, SubCategory))
-        {
-            UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: unknown variable Type '%s'"), *Context.AssetPath, *Type);
-            return false;
-        }
-
-        OutType.PinCategory = Category;
-        OutType.PinSubCategory = SubCategory;
-
-        const bool bNeedsSubObject = Category == UEdGraphSchema_K2::PC_Object || Category == UEdGraphSchema_K2::PC_Class
-            || Category == UEdGraphSchema_K2::PC_SoftObject || Category == UEdGraphSchema_K2::PC_SoftClass
-            || Category == UEdGraphSchema_K2::PC_Struct || Type == TEXT("enum");
-
-        FString SubType;
-        if (Desc->TryGetStringField(TEXT("SubType"), SubType))
-        {
-            UObject* Resolved = LoadObject<UObject>(nullptr, *SubType);
-            if (!Resolved)
+            if (m_bHadSetting)
             {
-                UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: cannot resolve SubType '%s'"), *Context.AssetPath, *SubType);
-                return false;
+                GConfig->SetBool(kDialogSection, kTypeChangeDialogKey, m_bPreviousSetting, GEditorPerProjectIni);
+                return;
             }
-            OutType.PinSubCategoryObject = Resolved;
+
+            GConfig->RemoveKey(kDialogSection, kTypeChangeDialogKey, GEditorPerProjectIni);
         }
-        else if (bNeedsSubObject)
+
+    private:
+        bool m_bHadSetting = false;
+        bool m_bPreviousSetting = false;
+    };
+
+    FString DescribeVariables(UBlueprint* Blueprint)
+    {
+        TArray<FString> Names;
+        for (const FBPVariableDescription& Description : Blueprint->NewVariables)
         {
-            UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: Type '%s' needs a SubType"), *Context.AssetPath, *Type);
+            Names.Add(Description.VarName.ToString());
+        }
+
+        return Names.Num() > 0 ? FString::Join(Names, TEXT(", ")) : TEXT("<none>");
+    }
+
+    FString DescribeComponents(UBlueprint* Blueprint)
+    {
+        TArray<FString> Names;
+        if (Blueprint->SimpleConstructionScript)
+        {
+            for (USCS_Node* Node : Blueprint->SimpleConstructionScript->GetAllNodes())
+            {
+                if (Node)
+                {
+                    Names.Add(Node->GetVariableName().ToString());
+                }
+            }
+        }
+
+        return Names.Num() > 0 ? FString::Join(Names, TEXT(", ")) : TEXT("<none>");
+    }
+
+    bool IsComponentVariable(UBlueprint* Blueprint, const FName VarName)
+    {
+        if (!Blueprint->SimpleConstructionScript)
+        {
             return false;
         }
 
-        FString Container;
-        Desc->TryGetStringField(TEXT("Container"), Container);
-
-        EPinContainerType ContainerType = EPinContainerType::None;
-        if (!ResolveContainerType(Container, ContainerType))
+        for (USCS_Node* Node : Blueprint->SimpleConstructionScript->GetAllNodes())
         {
-            UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: unknown Container '%s'"), *Context.AssetPath, *Container);
-            return false;
+            if (Node && Node->GetVariableName() == VarName)
+            {
+                return true;
+            }
         }
-        OutType.ContainerType = ContainerType;
 
-        return true;
+        return false;
+    }
+
+    void SetVariableMetaDataFlag(UBlueprint* Blueprint, const FName VarName, const FName& Key, bool bEnabled)
+    {
+        if (bEnabled)
+        {
+            FBlueprintEditorUtils::SetBlueprintVariableMetaData(Blueprint, VarName, nullptr, Key, TEXT("true"));
+            return;
+        }
+
+        FBlueprintEditorUtils::RemoveBlueprintVariableMetaData(Blueprint, VarName, nullptr, Key);
     }
 
     class FBlueprintVariableWriter : public IBlueprintWriter
@@ -168,11 +132,6 @@ namespace
                 UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("  %s: variable %s %s"), *Context.Blueprint->GetName(), *Op, *Name);
                 ++Context.Ops;
 
-                if (!Context.bApply)
-                {
-                    continue;
-                }
-
                 if (!ApplyOne(Context, Op, Name, Desc))
                 {
                     return false;
@@ -197,7 +156,7 @@ namespace
                 }
 
                 FEdGraphPinType PinType;
-                if (!BuildPinType(Context, Desc, PinType))
+                if (!BlueprintEdit::ResolvePinType(Context, Desc, PinType))
                 {
                     return false;
                 }
@@ -211,20 +170,14 @@ namespace
                     return false;
                 }
 
-                FString Category;
-                if (Desc->TryGetStringField(TEXT("Category"), Category))
-                {
-                    FBlueprintEditorUtils::SetBlueprintVariableCategory(Context.Blueprint, VarName, nullptr, FText::FromString(Category), /* bDontRecompile */ true);
-                }
-
-                return true;
+                return ApplyFields(Context, VarName, Desc);
             }
 
             if (Op == TEXT("Remove"))
             {
                 if (FBlueprintEditorUtils::FindNewVariableIndex(Context.Blueprint, VarName) == INDEX_NONE)
                 {
-                    UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: no variable named '%s'"), *Context.AssetPath, *Name);
+                    LogUnknownVariable(Context, VarName);
                     return false;
                 }
 
@@ -243,7 +196,7 @@ namespace
 
                 if (FBlueprintEditorUtils::FindNewVariableIndex(Context.Blueprint, VarName) == INDEX_NONE)
                 {
-                    UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: no variable named '%s'"), *Context.AssetPath, *Name);
+                    LogUnknownVariable(Context, VarName);
                     return false;
                 }
 
@@ -251,8 +204,252 @@ namespace
                 return true;
             }
 
-            UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: unknown variable Op '%s'"), *Context.AssetPath, *Op);
+            if (Op == TEXT("Modify"))
+            {
+                return ModifyOne(Context, VarName, Desc);
+            }
+
+            UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: unknown variable Op '%s'. Accepted: Add, Modify, Remove, Rename"), *Context.AssetPath, *Op);
             return false;
+        }
+
+        bool ModifyOne(FBlueprintEditContext& Context, const FName VarName, const TSharedPtr<FJsonObject>& Desc) const
+        {
+            const int32 VarIndex = FBlueprintEditorUtils::FindNewVariableIndex(Context.Blueprint, VarName);
+            if (VarIndex == INDEX_NONE)
+            {
+                LogUnknownVariable(Context, VarName);
+                return false;
+            }
+
+            FEdGraphPinType NewType = Context.Blueprint->NewVariables[VarIndex].VarType;
+            bool bTouchedType = false;
+            if (!BlueprintEdit::ResolvePinTypeOverrides(Context, Desc, NewType, bTouchedType))
+            {
+                return false;
+            }
+
+            const bool bRetyped = bTouchedType && NewType != Context.Blueprint->NewVariables[VarIndex].VarType;
+            if (bRetyped)
+            {
+                {
+                    FScopedTypeChangePrompt Prompt;
+                    FBlueprintEditorUtils::ChangeMemberVariableType(Context.Blueprint, VarName, NewType);
+                }
+
+                // ChangeMemberVariableType returns void and walks away from a type it will not take,
+                // so reading the type back is the only way to hear about it.
+                if (Context.Blueprint->NewVariables[VarIndex].VarType != NewType)
+                {
+                    UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: engine refused the new type for variable '%s'"), *Context.AssetPath, *VarName.ToString());
+                    return false;
+                }
+            }
+
+            if (!ApplyFields(Context, VarName, Desc))
+            {
+                return false;
+            }
+
+            FString Default;
+            if (Desc->TryGetStringField(TEXT("Default"), Default))
+            {
+                return ApplyDefault(Context, VarName, Default, bRetyped);
+            }
+
+            return true;
+        }
+
+        bool ApplyFields(FBlueprintEditContext& Context, const FName VarName, const TSharedPtr<FJsonObject>& Desc) const
+        {
+            FString Category;
+            if (Desc->TryGetStringField(TEXT("Category"), Category))
+            {
+                FBlueprintEditorUtils::SetBlueprintVariableCategory(Context.Blueprint, VarName, nullptr, FText::FromString(Category), /* bDontRecompile */ true);
+            }
+
+            FString Tooltip;
+            if (Desc->TryGetStringField(TEXT("Tooltip"), Tooltip))
+            {
+                FBlueprintEditorUtils::SetBlueprintVariableMetaData(Context.Blueprint, VarName, nullptr, FBlueprintMetadata::MD_Tooltip, Tooltip);
+            }
+
+            bool bFlag = false;
+            if (Desc->TryGetBoolField(TEXT("InstanceEditable"), bFlag))
+            {
+                // The engine stores the opposite of what the checkbox says.
+                FBlueprintEditorUtils::SetBlueprintOnlyEditableFlag(Context.Blueprint, VarName, !bFlag);
+            }
+            if (Desc->TryGetBoolField(TEXT("ReadOnly"), bFlag))
+            {
+                FBlueprintEditorUtils::SetBlueprintPropertyReadOnlyFlag(Context.Blueprint, VarName, bFlag);
+            }
+            if (Desc->TryGetBoolField(TEXT("Transient"), bFlag))
+            {
+                FBlueprintEditorUtils::SetVariableTransientFlag(Context.Blueprint, VarName, bFlag);
+            }
+            if (Desc->TryGetBoolField(TEXT("SaveGame"), bFlag))
+            {
+                FBlueprintEditorUtils::SetVariableSaveGameFlag(Context.Blueprint, VarName, bFlag);
+            }
+            if (Desc->TryGetBoolField(TEXT("AdvancedDisplay"), bFlag))
+            {
+                FBlueprintEditorUtils::SetVariableAdvancedDisplayFlag(Context.Blueprint, VarName, bFlag);
+            }
+            if (Desc->TryGetBoolField(TEXT("ExposeToCinematics"), bFlag))
+            {
+                FBlueprintEditorUtils::SetInterpFlag(Context.Blueprint, VarName, bFlag);
+            }
+            if (Desc->TryGetBoolField(TEXT("ExposeOnSpawn"), bFlag))
+            {
+                SetVariableMetaDataFlag(Context.Blueprint, VarName, FBlueprintMetadata::MD_ExposeOnSpawn, bFlag);
+            }
+            if (Desc->TryGetBoolField(TEXT("Private"), bFlag))
+            {
+                SetVariableMetaDataFlag(Context.Blueprint, VarName, FBlueprintMetadata::MD_Private, bFlag);
+            }
+            if (Desc->TryGetBoolField(TEXT("Config"), bFlag) && !ApplyPropertyFlag(Context, VarName, CPF_Config, bFlag))
+            {
+                return false;
+            }
+
+            return ApplyReplication(Context, VarName, Desc);
+        }
+
+        bool ApplyPropertyFlag(FBlueprintEditContext& Context, const FName VarName, uint64 Flag, bool bEnabled) const
+        {
+            uint64* PropertyFlags = FBlueprintEditorUtils::GetBlueprintVariablePropertyFlags(Context.Blueprint, VarName);
+            if (!PropertyFlags)
+            {
+                UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: variable '%s' carries no property flags"), *Context.AssetPath, *VarName.ToString());
+                return false;
+            }
+
+            if (bEnabled)
+            {
+                *PropertyFlags |= Flag;
+            }
+            else
+            {
+                *PropertyFlags &= ~Flag;
+            }
+
+            FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Context.Blueprint);
+            return true;
+        }
+
+        bool ApplyReplication(FBlueprintEditContext& Context, const FName VarName, const TSharedPtr<FJsonObject>& Desc) const
+        {
+            bool bReplicated = false;
+            bool bRepNotify = false;
+            FString RepNotifyFunc;
+            const bool bHasReplicated = Desc->TryGetBoolField(TEXT("Replicated"), bReplicated);
+            const bool bHasRepNotify = Desc->TryGetBoolField(TEXT("RepNotify"), bRepNotify);
+            const bool bHasRepNotifyFunc = Desc->TryGetStringField(TEXT("RepNotifyFunc"), RepNotifyFunc);
+
+            if (!bHasReplicated && !bHasRepNotify && !bHasRepNotifyFunc)
+            {
+                return true;
+            }
+
+            const int32 VarIndex = FBlueprintEditorUtils::FindNewVariableIndex(Context.Blueprint, VarName);
+            uint64* PropertyFlags = FBlueprintEditorUtils::GetBlueprintVariablePropertyFlags(Context.Blueprint, VarName);
+            if (VarIndex == INDEX_NONE || !PropertyFlags)
+            {
+                UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: variable '%s' carries no property flags"), *Context.AssetPath, *VarName.ToString());
+                return false;
+            }
+
+            const bool bWantsReplicated = bHasReplicated ? bReplicated : (*PropertyFlags & CPF_Net) != 0;
+            const bool bWantsRepNotify = bHasRepNotify ? bRepNotify : (*PropertyFlags & CPF_RepNotify) != 0;
+
+            if (!bWantsReplicated)
+            {
+                *PropertyFlags &= ~CPF_Net;
+                *PropertyFlags &= ~CPF_RepNotify;
+                FBlueprintEditorUtils::SetBlueprintVariableRepNotifyFunc(Context.Blueprint, VarName, NAME_None);
+                Context.Blueprint->NewVariables[VarIndex].ReplicationCondition = COND_None;
+                FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Context.Blueprint);
+                return true;
+            }
+
+            *PropertyFlags |= CPF_Net;
+
+            if (!bWantsRepNotify)
+            {
+                *PropertyFlags &= ~CPF_RepNotify;
+                FBlueprintEditorUtils::SetBlueprintVariableRepNotifyFunc(Context.Blueprint, VarName, NAME_None);
+                FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Context.Blueprint);
+                return true;
+            }
+
+            FName NotifyName = FName(*RepNotifyFunc);
+            if (!bHasRepNotifyFunc)
+            {
+                const FName Existing = FBlueprintEditorUtils::GetBlueprintVariableRepNotifyFunc(Context.Blueprint, VarName);
+                NotifyName = Existing.IsNone() ? FName(*FString::Printf(TEXT("OnRep_%s"), *VarName.ToString())) : Existing;
+            }
+
+            *PropertyFlags |= CPF_RepNotify;
+            FBlueprintEditorUtils::SetBlueprintVariableRepNotifyFunc(Context.Blueprint, VarName, NotifyName);
+            FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Context.Blueprint);
+            return true;
+        }
+
+        bool ApplyDefault(FBlueprintEditContext& Context, const FName VarName, const FString& Default, bool bRetyped) const
+        {
+            const int32 VarIndex = FBlueprintEditorUtils::FindNewVariableIndex(Context.Blueprint, VarName);
+            if (VarIndex == INDEX_NONE)
+            {
+                LogUnknownVariable(Context, VarName);
+                return false;
+            }
+
+            Context.Blueprint->Modify();
+            Context.Blueprint->NewVariables[VarIndex].DefaultValue = Default;
+
+            // A retype leaves the compiled property on the old type, so only the compiler can carry the
+            // value. Every other case writes the CDO too, which is what a reader sees before that compile.
+            if (bRetyped)
+            {
+                return true;
+            }
+
+            UClass* GeneratedClass = Context.Blueprint->GeneratedClass;
+            UObject* DefaultObject = GeneratedClass ? GeneratedClass->GetDefaultObject() : nullptr;
+            FProperty* Property = DefaultObject ? FindFProperty<FProperty>(DefaultObject->GetClass(), VarName) : nullptr;
+            if (!Property)
+            {
+                UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: variable '%s' has no compiled property to take a Default"), *Context.AssetPath, *VarName.ToString());
+                return false;
+            }
+
+            DefaultObject->Modify();
+            if (!FBlueprintEditorUtils::PropertyValueFromString(Property, Default, reinterpret_cast<uint8*>(DefaultObject), DefaultObject))
+            {
+                UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: variable '%s' rejected Default '%s'"), *Context.AssetPath, *VarName.ToString(), *Default);
+                return false;
+            }
+
+            return true;
+        }
+
+        void LogUnknownVariable(const FBlueprintEditContext& Context, const FName VarName) const
+        {
+            if (IsComponentVariable(Context.Blueprint, VarName))
+            {
+                UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: '%s' is a component, not a variable, its defaults go through the Defaults section. Components: %s"), *Context.AssetPath, *VarName.ToString(), *DescribeComponents(Context.Blueprint));
+                return;
+            }
+
+            UClass* ParentClass = Context.Blueprint->ParentClass;
+            if (ParentClass && FindFProperty<FProperty>(ParentClass, VarName))
+            {
+                UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: '%s' is inherited from %s and cannot be edited here. Own variables: %s"), *Context.AssetPath, *VarName.ToString(), *ParentClass->GetName(), *DescribeVariables(Context.Blueprint));
+                return;
+            }
+
+            UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: no variable named '%s'. Present: %s"), *Context.AssetPath, *VarName.ToString(), *DescribeVariables(Context.Blueprint));
         }
     };
 }

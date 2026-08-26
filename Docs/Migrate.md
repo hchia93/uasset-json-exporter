@@ -114,6 +114,24 @@ bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
 | 1 | 至少一个 level 失败，或参数错误 |
 | 2 | 编辑器在运行 |
 
+## 退出码
+
+| 码 | 含义 |
+| --- | --- |
+| 0 | 成功 |
+| 1 | 执行失败或参数错误 |
+| 2 | 编辑器在运行 |
+
+Migrate 组不会返回 3，3 是 Audit 组专用。退 1 的具体口径逐 commandlet 不同。
+
+| RunName | 什么情况退 1 |
+| --- | --- |
+| `DeleteBlueprintNode` | 参数错、node id 解析不了、没有资产、编译或保存失败 |
+| `DuplicateAsset` | 参数错、源资产缺失、目标已存在 |
+| `SanitizeLevelReference` | 参数错，或至少一个 level 失败 |
+
+没命中任何节点的 `DeleteBlueprintNode` 不算失败，退 0 并在结尾把没命中的 id 报出来。
+
 ## dry run 与 apply
 
 默认行为按 commandlet 分两种。
@@ -123,6 +141,7 @@ bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
 | `RedirectBlueprintEvent` | 只扫描 | 补 `-apply` |
 | `RedirectBlueprintPin` | 只扫描 | 补 `-apply` |
 | `DeleteBlueprintNode` | 只扫描 | 补 `-apply` |
+| `DuplicateAsset` | 只扫描 | 补 `-apply` |
 | `SanitizeLevelReference` | 直接落盘 | 想先看结果就加 `-dryrun` |
 
 两个 redirect 的扫描输出里逐条列出命中的 Blueprint、事件或节点、以及会搬多少组连线，确认无误再补 `-apply` 编译并保存。

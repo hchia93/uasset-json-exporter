@@ -9,15 +9,9 @@ class UBTNode;
 class UBTCompositeNode;
 struct FBTCompositeChild;
 
-/*
- * Exports BehaviorTree structure (composites, tasks, decorators, services) to JSON.
- *
- * Usage:
- *   UnrealEditor-Cmd.exe Project.uproject -run=BehaviorTreeExport -assets="/Game/Path/BT_A,/Game/Path/BT_B"
- *
- * Output:
- *   <ProjectDir>/Intermediate/UAssetExport/<AssetPath>.json
- */
+// Exports BehaviorTree structure to JSON: composites, tasks, decorators, services, Blackboard keys.
+//   UnrealEditor-Cmd.exe Project.uproject -run=BehaviorTreeExport -assets="/Game/Path/BT_A,/Game/Path/BT_B"
+// Contract: Docs/Export.md
 UCLASS()
 class UBehaviorTreeExportCommandlet : public UCommandlet
 {

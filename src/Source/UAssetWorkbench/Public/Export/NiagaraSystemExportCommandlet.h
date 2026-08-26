@@ -13,15 +13,9 @@ struct FNiagaraParameterStore;
 struct FNiagaraTypeDefinition;
 struct FVersionedNiagaraEmitterData;
 
-/*
- * Exports Niagara System structure (emitters, module input values, lifecycle, renderers, curves) to JSON.
- *
- * Usage:
- *   UnrealEditor-Cmd.exe Project.uproject -run=NiagaraSystemExport -assets="/Game/Path/NS_A,/Game/Path/NS_B"
- *
- * Output:
- *   <ProjectDir>/Intermediate/UAssetExport/<AssetPath>.json
- */
+// Exports Niagara System structure to JSON: emitters, module input values, lifecycle, renderers, curves.
+//   UnrealEditor-Cmd.exe Project.uproject -run=NiagaraSystemExport -assets="/Game/Path/NS_A,/Game/Path/NS_B"
+// Contract: Docs/Export.md
 UCLASS()
 class UNiagaraSystemExportCommandlet : public UCommandlet
 {

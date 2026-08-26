@@ -55,9 +55,10 @@ int32 URedirectBlueprintPinCommandlet::Main(const FString& Params)
 
     int32 TotalRedirected = 0;
     int32 BlueprintsChanged = 0;
+    bool bSaveFailed = false;
     for (const FString& AssetPath : AssetPaths)
     {
-        const int32 Redirected = RedirectBlueprintPins(AssetPath, OldPin, NewPin, bApply);
+        const int32 Redirected = RedirectBlueprintPins(AssetPath, OldPin, NewPin, bApply, bSaveFailed);
         if (Redirected > 0)
         {
             ++BlueprintsChanged;
@@ -67,16 +68,18 @@ int32 URedirectBlueprintPinCommandlet::Main(const FString& Params)
 
     UE_LOG(LogUAssetWorkbenchMigrator, Display, TEXT("Done. Redirected %d node(s) across %d/%d blueprint(s) %s"),
         TotalRedirected, BlueprintsChanged, AssetPaths.Num(), bApply ? TEXT("(saved)") : TEXT("(dry run, not saved)"));
-    return ToExitCode(EUAssetWorkbenchExitType::Success);
+
+    const EUAssetWorkbenchExitType ExitType = bSaveFailed ? EUAssetWorkbenchExitType::Failed : EUAssetWorkbenchExitType::Success;
+    return ToExitCode(ExitType);
 }
 
-int32 URedirectBlueprintPinCommandlet::RedirectBlueprintPins(const FString& AssetPath, FName OldPin, FName NewPin, bool bApply) const
+int32 URedirectBlueprintPinCommandlet::RedirectBlueprintPins(const FString& AssetPath, FName OldPin, FName NewPin, bool bApply, bool& OutSaveFailed) const
 {
     UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *AssetPath);
     if (!Blueprint)
     {
         UE_LOG(LogUAssetWorkbenchMigrator, Warning, TEXT("Failed to load Blueprint: %s"), *AssetPath);
-        return 0;
+        return ToExitCode(EUAssetWorkbenchExitType::Success);
     }
 
     TArray<UEdGraph*> Graphs;
@@ -124,7 +127,7 @@ int32 URedirectBlueprintPinCommandlet::RedirectBlueprintPins(const FString& Asse
     if (Redirected == 0)
     {
         UE_LOG(LogUAssetWorkbenchMigrator, Warning, TEXT("%s: no node carrying both '%s' and '%s' output pins."), *Blueprint->GetName(), *OldPin.ToString(), *NewPin.ToString());
-        return 0;
+        return ToExitCode(EUAssetWorkbenchExitType::Success);
     }
 
     if (!bApply)
@@ -136,6 +139,7 @@ int32 URedirectBlueprintPinCommandlet::RedirectBlueprintPins(const FString& Asse
     FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 
     const bool bSaved = UAssetWorkbench::CompileAndSavePackage(Blueprint);
+    OutSaveFailed |= !bSaved;
 
     UE_LOG(LogUAssetWorkbenchMigrator, Display, TEXT("%s: %d node(s) %s"), *Blueprint->GetName(), Redirected, bSaved ? TEXT("compiled + SAVED") : TEXT("compiled, SAVE FAILED"));
 

@@ -1,10 +1,10 @@
-#include "Edit/EditAnimMontageCommandlet.h"
-#include "Edit/MontageWriter.h"
+#include "Edit/EditAnimAssetCommandlet.h"
+#include "Edit/AnimAssetWriter.h"
 #include "UAssetWorkbenchModule.h"
 #include "UAssetWorkbenchUtil.h"
 #include "UAssetWorkbenchVersion.h"
 
-#include "Animation/AnimMontage.h"
+#include "Animation/AnimSequenceBase.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Misc/FileHelper.h"
@@ -14,15 +14,21 @@
 
 namespace
 {
-    TArray<TUniquePtr<IMontageWriter>> MakeWriters()
+    // Composition first: slots decide the montage length, and every writer after this one validates
+    // its times against that length.
+    TArray<TUniquePtr<IAnimAssetWriter>> MakeWriters()
     {
-        TArray<TUniquePtr<IMontageWriter>> Writers;
-        Writers.Add(MakeMontageNotifyWriter());
+        TArray<TUniquePtr<IAnimAssetWriter>> Writers;
+        Writers.Add(MakeAnimMontageSlotWriter());
+        Writers.Add(MakeAnimMontageSectionWriter());
+        Writers.Add(MakeAnimCurveWriter());
+        Writers.Add(MakeAnimSyncMarkerWriter());
+        Writers.Add(MakeAnimNotifyWriter());
         return Writers;
     }
 }
 
-UEditAnimMontageCommandlet::UEditAnimMontageCommandlet()
+UEditAnimAssetCommandlet::UEditAnimAssetCommandlet()
 {
     IsClient = false;
     IsEditor = true;
@@ -30,14 +36,14 @@ UEditAnimMontageCommandlet::UEditAnimMontageCommandlet()
     LogToConsole = true;
 }
 
-int32 UEditAnimMontageCommandlet::Main(const FString& Params)
+int32 UEditAnimAssetCommandlet::Main(const FString& Params)
 {
     if (UAssetWorkbench::AbortIfLiveEditor())
     {
         return ToExitCode(EUAssetWorkbenchExitType::EditorConflict);
     }
 
-    UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("UAssetWorkbench v%s - EditAnimMontage"), UASSET_WORKBENCH_VERSION_STRING);
+    UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("UAssetWorkbench v%s - EditAnimAsset"), UASSET_WORKBENCH_VERSION_STRING);
 
     FString SpecPath;
     if (!FParse::Value(*Params, TEXT("spec="), SpecPath))
@@ -48,6 +54,14 @@ int32 UEditAnimMontageCommandlet::Main(const FString& Params)
 
     SpecPath = SpecPath.TrimQuotes();
     const bool bApply = FParse::Param(*Params, TEXT("apply"));
+
+    // Writers mutate either way, only the save reads bApply, so a dry run relies on the process exiting
+    // to throw the mutation away. In-editor there is no such exit.
+    if (!bApply && !IsRunningCommandlet())
+    {
+        UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("Dry run needs its own process to discard the in-memory edit. Close the editor and run the commandlet, or pass -apply."));
+        return ToExitCode(EUAssetWorkbenchExitType::EditorConflict);
+    }
 
     FString SpecText;
     if (!FFileHelper::LoadFileToString(SpecText, *SpecPath))
@@ -71,14 +85,14 @@ int32 UEditAnimMontageCommandlet::Main(const FString& Params)
         return ToExitCode(EUAssetWorkbenchExitType::Failed);
     }
 
-    UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("EditAnimMontage: %d target(s) %s"), Targets->Num(), bApply ? TEXT("[APPLY]") : TEXT("[DRY RUN]"));
+    UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("EditAnimAsset: %d target(s) %s"), Targets->Num(), bApply ? TEXT("[APPLY]") : TEXT("[DRY RUN]"));
 
-    TSet<UAnimMontage*> Touched;
+    TSet<UAnimSequenceBase*> Touched;
     int32 Ops = 0;
     for (const TSharedPtr<FJsonValue>& Value : *Targets)
     {
         const TSharedPtr<FJsonObject>& Entry = Value->AsObject();
-        if (!Entry.IsValid() || !ApplyTarget(Entry, bApply, Touched, Ops))
+        if (!Entry.IsValid() || !ApplyTarget(Entry, Touched, Ops))
         {
             UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("Target failed, nothing saved"));
             return ToExitCode(EUAssetWorkbenchExitType::Failed);
@@ -87,24 +101,24 @@ int32 UEditAnimMontageCommandlet::Main(const FString& Params)
 
     if (!bApply)
     {
-        UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("Done. %d operation(s) staged across %d montage(s) (dry run, not saved)."), Ops, Touched.Num());
+        UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("Done. %d operation(s) staged across %d asset(s) (dry run, not saved)."), Ops, Touched.Num());
         return ToExitCode(EUAssetWorkbenchExitType::Success);
     }
 
-    for (UAnimMontage* Montage : Touched)
+    for (UAnimSequenceBase* AnimAsset : Touched)
     {
-        if (!UAssetWorkbench::CompileAndSavePackage(Montage, false))
+        if (!UAssetWorkbench::CompileAndSavePackage(AnimAsset, false))
         {
-            UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("Failed to save package for %s"), *Montage->GetPathName());
+            UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("Failed to save package for %s"), *AnimAsset->GetPathName());
             return ToExitCode(EUAssetWorkbenchExitType::Failed);
         }
     }
 
-    UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("Done. %d operation(s) across %d montage(s) (saved)."), Ops, Touched.Num());
+    UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("Done. %d operation(s) across %d asset(s) (saved)."), Ops, Touched.Num());
     return ToExitCode(EUAssetWorkbenchExitType::Success);
 }
 
-bool UEditAnimMontageCommandlet::ApplyTarget(const TSharedPtr<FJsonObject>& Entry, bool bApply, TSet<UAnimMontage*>& OutTouched, int32& OutOps) const
+bool UEditAnimAssetCommandlet::ApplyTarget(const TSharedPtr<FJsonObject>& Entry, TSet<UAnimSequenceBase*>& OutTouched, int32& OutOps) const
 {
     FString AssetPath;
     if (!Entry->TryGetStringField(TEXT("AssetPath"), AssetPath))
@@ -113,22 +127,21 @@ bool UEditAnimMontageCommandlet::ApplyTarget(const TSharedPtr<FJsonObject>& Entr
         return false;
     }
 
-    UAnimMontage* Montage = LoadObject<UAnimMontage>(nullptr, *AssetPath);
-    if (!Montage)
+    UAnimSequenceBase* AnimAsset = LoadObject<UAnimSequenceBase>(nullptr, *AssetPath);
+    if (!AnimAsset)
     {
-        UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("Failed to load AnimMontage: %s"), *AssetPath);
+        UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("Failed to load anim asset (sequence or montage): %s"), *AssetPath);
         return false;
     }
 
-    FMontageEditContext Context;
-    Context.Montage = Montage;
+    FAnimAssetEditContext Context;
+    Context.AnimAsset = AnimAsset;
     Context.AssetPath = AssetPath;
-    Context.bApply = bApply;
 
-    TArray<TUniquePtr<IMontageWriter>> Writers = MakeWriters();
+    TArray<TUniquePtr<IAnimAssetWriter>> Writers = MakeWriters();
 
     int32 Matched = 0;
-    for (const TUniquePtr<IMontageWriter>& Writer : Writers)
+    for (const TUniquePtr<IAnimAssetWriter>& Writer : Writers)
     {
         const TSharedPtr<FJsonValue> Section = Entry->TryGetField(Writer->GetSpecKey());
         if (!Section.IsValid())
@@ -145,20 +158,16 @@ bool UEditAnimMontageCommandlet::ApplyTarget(const TSharedPtr<FJsonObject>& Entr
 
     if (Matched == 0)
     {
-        UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s writes nothing. Expected Notifies"), *AssetPath);
+        UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s writes nothing. Expected Notifies, Curves, SyncMarkers, Sections or Slots"), *AssetPath);
         return false;
     }
 
     OutOps += Context.Ops;
 
-    if (bApply)
-    {
-        // Sorts the notify array and rebuilds the panel's per-track lists. Ops address notifies by
-        // array position, so this runs once the target is done, never between its ops.
-        Montage->RefreshCacheData();
-        Montage->PostEditChange();
-        OutTouched.Add(Montage);
-    }
-
+    // Sorts the notify and sync marker arrays and rebuilds the panel's per-track lists. Ops address
+    // both by array position, so this runs once the target is done, never between its ops.
+    AnimAsset->RefreshCacheData();
+    AnimAsset->PostEditChange();
+    OutTouched.Add(AnimAsset);
     return true;
 }

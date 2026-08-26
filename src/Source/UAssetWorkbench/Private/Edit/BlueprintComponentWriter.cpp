@@ -94,11 +94,6 @@ namespace
                 UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("  %s: component %s %s"), *Context.Blueprint->GetName(), *Op, *Name);
                 ++Context.Ops;
 
-                if (!Context.bApply)
-                {
-                    continue;
-                }
-
                 if (!ApplyOne(Context, Subsystem, Handles, RootHandle, Op, Name, Desc))
                 {
                     return false;

@@ -10,6 +10,7 @@
 #include "Engine/Blueprint.h"
 #include "Engine/World.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformProcess.h"
 #include "JsonObjectConverter.h"
 #include "Logging/MessageLog.h"
 #include "Misc/DateTime.h"
@@ -243,8 +244,20 @@ int32 UAssetWorkbench::ApplyProperties(UObject* Target, const TSharedPtr<FJsonOb
         FString StringValue;
         if (Pair.Value->TryGetString(StringValue))
         {
+            FString Before;
+            Property->ExportTextItem_Direct(Before, Address, nullptr, Owner, PPF_None);
+
             if (Property->ImportText_Direct(*StringValue, Address, Owner, PPF_None))
             {
+                // ImportText reports success for a literal it silently ignores, an empty struct literal
+                // being the usual one. Reading the value back is the only way to catch that.
+                FString After;
+                Property->ExportTextItem_Direct(After, Address, nullptr, Owner, PPF_None);
+                if (Before == After)
+                {
+                    UE_LOG(LogUAssetWorkbenchCore, Warning, TEXT("%s = %s left the value unchanged, it either already held it or the literal writes nothing"), *Pair.Key, *StringValue);
+                }
+
                 ++Written;
                 continue;
             }
@@ -279,6 +292,11 @@ bool UAssetWorkbench::CompileAndSavePackage(UObject* Asset, bool bCompileBluepri
         if (UBlueprint* Blueprint = Cast<UBlueprint>(Asset))
         {
             FKismetEditorUtilities::CompileBlueprint(Blueprint);
+            if (Blueprint->Status == BS_Error)
+            {
+                UE_LOG(LogUAssetWorkbenchCore, Error, TEXT("Compile failed for %s, package not saved"), *Blueprint->GetPathName());
+                return false;
+            }
         }
     }
 
@@ -295,12 +313,98 @@ bool UAssetWorkbench::CompileAndSavePackage(UObject* Asset, bool bCompileBluepri
     return UPackage::SavePackage(Package, nullptr, *FileName, SaveArgs);
 }
 
+namespace
+{
+    // Stamped into every export name so a re-export of an older revision cannot overwrite a newer capture,
+    // and so a reader can tell which asset revision a file describes without opening it.
+    FString QueryPackageRevision(const FString& AssetPath)
+    {
+        FString PackageName = AssetPath;
+        int32 ObjectDelimiter = INDEX_NONE;
+        if (PackageName.FindChar(TEXT('.'), ObjectDelimiter))
+        {
+            PackageName.LeftInline(ObjectDelimiter);
+        }
+
+        FString PackageFile;
+        if (!FPackageName::DoesPackageExist(PackageName, &PackageFile))
+        {
+            return TEXT("rNA");
+        }
+
+        int32 ReturnCode = INDEX_NONE;
+        FString StdOut;
+        FString StdErr;
+        const FString Args = FString::Printf(TEXT("info --show-item last-changed-revision \"%s\""), *FPaths::ConvertRelativePathToFull(PackageFile));
+        if (!FPlatformProcess::ExecProcess(TEXT("svn"), *Args, &ReturnCode, &StdOut, &StdErr))
+        {
+            return TEXT("rNA");
+        }
+
+        StdOut.TrimStartAndEndInline();
+        const bool bUsable = ReturnCode == 0 && !StdOut.IsEmpty() && StdOut.IsNumeric();
+        return bUsable ? FString::Printf(TEXT("r%s"), *StdOut) : TEXT("rNA");
+    }
+
+    FString StampExportPath(const FString& BasePath, const FString& AssetPath)
+    {
+        const FString Stamp = FString::Printf(TEXT("_%s_%s"), *QueryPackageRevision(AssetPath), *FDateTime::Now().ToString(TEXT("%Y%m%d-%H%M%S")));
+
+        return FPaths::SetExtension(BasePath, TEXT("")) + Stamp + TEXT(".json");
+    }
+}
+
 FString UAssetWorkbench::GetExportPath(const FString& AssetPath)
 {
     FString RelativePath = AssetPath;
     RelativePath.RemoveFromStart(TEXT("/"));
 
     return FPaths::Combine(FPaths::ProjectDir(), TEXT("Intermediate"), TEXT("UAssetExport"), RelativePath + TEXT(".json"));
+}
+
+bool UAssetWorkbench::HasStampedExportSince(const FString& AssetPath, const FDateTime& Since)
+{
+    const FString BasePath = GetExportPath(AssetPath);
+    const FString Directory = FPaths::GetPath(BasePath);
+    const FString Pattern = FPaths::GetBaseFilename(BasePath) + TEXT("_r*.json");
+
+    // GetTimeStamp clamps a file time to whole seconds, so a bound carrying milliseconds never lands.
+    const FDateTime Bound(Since.GetTicks() - Since.GetTicks() % ETimespan::TicksPerSecond);
+
+    TArray<FString> FileNames;
+    IFileManager::Get().FindFiles(FileNames, *FPaths::Combine(Directory, Pattern), true, false);
+
+    for (const FString& FileName : FileNames)
+    {
+        if (IFileManager::Get().GetTimeStamp(*FPaths::Combine(Directory, FileName)) >= Bound)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+UAssetWorkbench::FExportTarget::FExportTarget(const FString& InAssetPath)
+    : m_AssetPath(InAssetPath)
+    , m_Path(GetExportPath(InAssetPath))
+{
+}
+
+bool UAssetWorkbench::FExportTarget::Save(const TSharedRef<FJsonObject>& JsonObject)
+{
+    if (!SaveJsonToFile(JsonObject, m_Path))
+    {
+        return false;
+    }
+
+    const FString Stamped = StampExportPath(m_Path, m_AssetPath);
+    if (IFileManager::Get().Move(*Stamped, *m_Path))
+    {
+        m_Path = Stamped;
+    }
+
+    return true;
 }
 
 bool UAssetWorkbench::SaveJsonToFile(const TSharedRef<FJsonObject>& JsonObject, const FString& FilePath)

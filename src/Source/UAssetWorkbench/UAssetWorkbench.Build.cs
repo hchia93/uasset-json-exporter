@@ -12,6 +12,7 @@ public class UAssetWorkbench : ModuleRules
                 "Core",
                 "CoreUObject",
                 "Engine",
+                "InputCore",
                 "UnrealEd",
                 "AssetRegistry",
                 "AssetTools",
@@ -26,6 +27,9 @@ public class UAssetWorkbench : ModuleRules
                 "MovieScene",
                 "Slate",
                 "SlateCore",
+                "MaterialEditor",
+                "RenderCore",
+                "RHI",
                 "Niagara",
                 "NiagaraCore",
                 "NiagaraEditor",
@@ -34,7 +38,9 @@ public class UAssetWorkbench : ModuleRules
                 "DirectoryWatcher",
                 "Projects",
                 "EditorSubsystem",
-                "SubobjectDataInterface"
+                "SubobjectDataInterface",
+                "TargetPlatform",
+                "TextureUtilitiesCommon"
             }
         );
     }

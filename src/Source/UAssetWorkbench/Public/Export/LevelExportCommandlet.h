@@ -5,29 +5,11 @@
 
 #include "LevelExportCommandlet.generated.h"
 
-/*
- * Exports Level (.umap) contents to JSON.
- *
- * Strategy:
- *   For every Actor and Component, only non-default properties (delta against
- *   UObject::GetArchetype()) are serialized. This mirrors what the .umap itself
- *   persists, giving complete fidelity at minimum size.
- *
- *   Key collision / mesh / mobility fields are hoisted into top-level component
- *   keys for easy grep; remaining overrides live under DeltaProperties.
- *
- *   Instanced components (ISM / HISM / Foliage) with > InstanceDumpThreshold
- *   instances only record count + bounds + first few samples.
- *
- *   Instanced subobjects that are not components (WorldSettings' NavigationSystemConfig,
- *   etc) are nested under their property name with absolute values, not a delta.
- *
- * Usage:
- *   UnrealEditor-Cmd.exe Project.uproject -run=LevelExport -assets="/Game/Maps/L_A,/Game/Maps/L_B"
- *
- * Output:
- *   <ProjectDir>/Intermediate/UAssetExport/<LevelPath>.json
- */
+// Exports level contents to JSON. Actors and components carry only their delta against the archetype,
+// which is what the umap itself persists. Collision, mesh and mobility are hoisted to top-level keys for
+// grep, and an instanced component past the dump threshold records count, bounds and a few samples.
+//   UnrealEditor-Cmd.exe Project.uproject -run=LevelExport -assets="/Game/Maps/L_A,/Game/Maps/L_B"
+// Contract: Docs/Export.md
 UCLASS()
 class ULevelExportCommandlet : public UCommandlet
 {

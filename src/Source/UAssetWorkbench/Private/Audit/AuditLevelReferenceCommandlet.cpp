@@ -42,7 +42,7 @@ int32 UAuditLevelReferenceCommandlet::Main(const FString& Params)
     FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
     IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 
-    // Force a synchronous full scan; dependency edges and on-disk existence must be current.
+    // Force a synchronous full scan, dependency edges and on-disk existence must be current.
     UE_LOG(LogUAssetWorkbenchAuditor, Display, TEXT("AuditLevelReference: scanning asset registry..."));
     AssetRegistry.SearchAllAssets(/*bSynchronousSearch=*/ true);
 
@@ -98,7 +98,7 @@ void UAuditLevelReferenceCommandlet::AuditLevel(FName LevelPackage, IAssetRegist
     {
         const FString DepStr = Dependency.ToString();
 
-        // /Script/* are code modules, not on-disk packages; self-edge is not a ref.
+        // /Script/* are code modules, not on-disk packages. Self-edge is not a ref.
         if (DepStr.StartsWith(TEXT("/Script/")) || DepStr == LevelStr)
         {
             continue;

@@ -14,7 +14,7 @@ import json
 import os
 import sys
 
-from level_budget_audit import audit_level, default_project_dir
+from level_budget_audit import audit_level, default_project_dir, latest_exports
 
 
 def load_timings(result_path):
@@ -33,7 +33,7 @@ def load_scale(project_dir):
     pattern = os.path.join(project_dir, "Intermediate", "UAssetExport", "Game", "**", "*.json")
     scale = {}
 
-    for path in glob.glob(pattern, recursive=True):
+    for path in latest_exports(pattern):
         try:
             row = audit_level(path)
         except (ValueError, KeyError):

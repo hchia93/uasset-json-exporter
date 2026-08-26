@@ -4,15 +4,10 @@
 #include "Commandlets/Commandlet.h"
 #include "ResaveAssetCommandlet.generated.h"
 
-// Force-resaves assets so load-time fixups bake into the package on disk. Use after a CoreRedirect
-// (class/property) so the redirected reference is serialized under its new name and the redirect can
-// eventually be dropped, or to flush any load-time upgrade. Blueprints are compiled before saving.
-//
-// One operation per commandlet. Generic: asset paths are runtime args, nothing project-specific.
-//
-// Usage:
+// Force-resaves assets so load-time fixups bake into the package, which is what lets a CoreRedirect be
+// dropped afterwards. Blueprints are compiled before saving unless -nocompile says otherwise.
 //   -run=ResaveAsset -assets="/Game/A,/Game/Maps/B" [-nocompile]
-//   -nocompile: skip the Blueprint compile step (plain reserialize only).
+// Contract: Docs/Migrate.md
 UCLASS()
 class UResaveAssetCommandlet : public UCommandlet
 {

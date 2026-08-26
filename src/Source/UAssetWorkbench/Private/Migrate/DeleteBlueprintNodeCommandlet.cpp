@@ -59,9 +59,10 @@ int32 UDeleteBlueprintNodeCommandlet::Main(const FString& Params)
     TSet<FGuid> Matched;
     int32 TotalDeleted = 0;
     int32 BlueprintsChanged = 0;
+    bool bSaveFailed = false;
     for (const FString& AssetPath : AssetPaths)
     {
-        const int32 Deleted = DeleteBlueprintNodes(AssetPath, NodeGuids, bApply, Matched);
+        const int32 Deleted = DeleteBlueprintNodes(AssetPath, NodeGuids, bApply, Matched, bSaveFailed);
         if (Deleted > 0)
         {
             ++BlueprintsChanged;
@@ -85,16 +86,18 @@ int32 UDeleteBlueprintNodeCommandlet::Main(const FString& Params)
 
     UE_LOG(LogUAssetWorkbenchMigrator, Display, TEXT("Done. Deleted %d node(s) across %d/%d blueprint(s) %s"),
         TotalDeleted, BlueprintsChanged, AssetPaths.Num(), bApply ? TEXT("(saved)") : TEXT("(dry run, not saved)"));
-    return ToExitCode(EUAssetWorkbenchExitType::Success);
+
+    const EUAssetWorkbenchExitType ExitType = bSaveFailed ? EUAssetWorkbenchExitType::Failed : EUAssetWorkbenchExitType::Success;
+    return ToExitCode(ExitType);
 }
 
-int32 UDeleteBlueprintNodeCommandlet::DeleteBlueprintNodes(const FString& AssetPath, const TSet<FGuid>& NodeGuids, bool bApply, TSet<FGuid>& OutMatched) const
+int32 UDeleteBlueprintNodeCommandlet::DeleteBlueprintNodes(const FString& AssetPath, const TSet<FGuid>& NodeGuids, bool bApply, TSet<FGuid>& OutMatched, bool& OutSaveFailed) const
 {
     UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *AssetPath);
     if (!Blueprint)
     {
         UE_LOG(LogUAssetWorkbenchMigrator, Warning, TEXT("Failed to load Blueprint: %s"), *AssetPath);
-        return 0;
+        return ToExitCode(EUAssetWorkbenchExitType::Success);
     }
 
     TArray<UEdGraph*> Graphs;
@@ -132,7 +135,7 @@ int32 UDeleteBlueprintNodeCommandlet::DeleteBlueprintNodes(const FString& AssetP
 
     if (Doomed.IsEmpty())
     {
-        return 0;
+        return ToExitCode(EUAssetWorkbenchExitType::Success);
     }
 
     for (UEdGraphNode* Node : Doomed)
@@ -163,6 +166,7 @@ int32 UDeleteBlueprintNodeCommandlet::DeleteBlueprintNodes(const FString& AssetP
     FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 
     const bool bSaved = UAssetWorkbench::CompileAndSavePackage(Blueprint);
+    OutSaveFailed |= !bSaved;
 
     UE_LOG(LogUAssetWorkbenchMigrator, Display, TEXT("%s: %d node(s) %s"), *Blueprint->GetName(), Deleted, bSaved ? TEXT("compiled + SAVED") : TEXT("compiled, SAVE FAILED"));
 

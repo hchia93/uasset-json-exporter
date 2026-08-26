@@ -43,8 +43,6 @@ private:
     TSharedPtr<SNotificationItem> ShowStartToast(const FString& RunName, const TArray<FString>& Assets) const;
     static void FinishToast(TSharedPtr<SNotificationItem> Item, bool bSuccess, const FString& Summary);
 
-    // Mutating runs report here instead of a toast, the entry survives past the toast fade.
-
     FTSTicker::FDelegateHandle m_HeartbeatHandle;
     FDelegateHandle m_DirectoryWatcherHandle;
     FString m_WatchedDirectory;

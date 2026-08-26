@@ -22,6 +22,10 @@ namespace
         Writers.Add(MakeBlueprintComponentWriter());
         Writers.Add(MakeBlueprintVariableWriter());
         Writers.Add(MakeBlueprintDefaultsWriter());
+        Writers.Add(MakeBlueprintFunctionWriter());
+        Writers.Add(MakeBlueprintDispatcherWriter());
+        Writers.Add(MakeBlueprintInterfaceWriter());
+        Writers.Add(MakeBlueprintStateMachineWriter());
         Writers.Add(MakeBlueprintGraphWriter());
         Writers.Add(MakeBlueprintLayoutWriter());
         return Writers;
@@ -55,6 +59,14 @@ int32 UEditBlueprintCommandlet::Main(const FString& Params)
     SpecPath = SpecPath.TrimQuotes();
     const bool bApply = FParse::Param(*Params, TEXT("apply"));
 
+    // Writers mutate either way, only compile and save read bApply, so a dry run relies on the process
+    // exiting to throw the mutation away. In-editor there is no such exit.
+    if (!bApply && !IsRunningCommandlet())
+    {
+        UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("Dry run needs its own process to discard the in-memory edit. Close the editor and run the commandlet, or pass -apply."));
+        return ToExitCode(EUAssetWorkbenchExitType::EditorConflict);
+    }
+
     FString SpecText;
     if (!FFileHelper::LoadFileToString(SpecText, *SpecPath))
     {
@@ -85,7 +97,7 @@ int32 UEditBlueprintCommandlet::Main(const FString& Params)
     for (const TSharedPtr<FJsonValue>& Value : *Targets)
     {
         const TSharedPtr<FJsonObject>& Entry = Value->AsObject();
-        if (!Entry.IsValid() || !ApplyTarget(Entry, bApply, Touched, Ops))
+        if (!Entry.IsValid() || !ApplyTarget(Entry, Touched, Ops))
         {
             UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("Target failed, nothing saved"));
             return ToExitCode(EUAssetWorkbenchExitType::Failed);
@@ -111,7 +123,7 @@ int32 UEditBlueprintCommandlet::Main(const FString& Params)
     return ToExitCode(EUAssetWorkbenchExitType::Success);
 }
 
-bool UEditBlueprintCommandlet::ApplyTarget(const TSharedPtr<FJsonObject>& Entry, bool bApply, TMap<UBlueprint*, bool>& OutTouched, int32& OutOps) const
+bool UEditBlueprintCommandlet::ApplyTarget(const TSharedPtr<FJsonObject>& Entry, TMap<UBlueprint*, bool>& OutTouched, int32& OutOps) const
 {
     FString AssetPath;
     if (!Entry->TryGetStringField(TEXT("AssetPath"), AssetPath))
@@ -130,7 +142,6 @@ bool UEditBlueprintCommandlet::ApplyTarget(const TSharedPtr<FJsonObject>& Entry,
     FBlueprintEditContext Context;
     Context.Blueprint = Blueprint;
     Context.AssetPath = AssetPath;
-    Context.bApply = bApply;
 
     TArray<TUniquePtr<IBlueprintWriter>> Writers = MakeWriters();
 
@@ -152,7 +163,7 @@ bool UEditBlueprintCommandlet::ApplyTarget(const TSharedPtr<FJsonObject>& Entry,
 
     if (Matched == 0)
     {
-        UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s writes nothing. Expected one of Components, Variables, Defaults, Graph, Layout"), *AssetPath);
+        UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s writes nothing. Expected one of Components, Variables, Defaults, Functions, Dispatchers, Interfaces, StateMachines, Graph, Layout"), *AssetPath);
         return false;
     }
 

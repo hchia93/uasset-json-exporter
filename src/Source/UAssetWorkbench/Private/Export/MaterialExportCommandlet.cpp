@@ -13,8 +13,10 @@
 #include "Materials/MaterialExpressionTextureSampleParameter.h"
 #include "Materials/MaterialExpressionCustom.h"
 #include "Materials/MaterialInstance.h"
+#include "Materials/MaterialInstanceBasePropertyOverrides.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "Misc/FileHelper.h"
+#include "UObject/UnrealType.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
@@ -72,10 +74,10 @@ int32 UMaterialExportCommandlet::Main(const FString& Params)
             TSharedPtr<FJsonObject> JsonObject = ExportMaterialInstance(MaterialInstance);
             if (JsonObject.IsValid())
             {
-                FString OutputPath = UAssetWorkbench::GetExportPath(AssetPath);
-                if (UAssetWorkbench::SaveJsonToFile(JsonObject.ToSharedRef(), OutputPath))
+                UAssetWorkbench::FExportTarget ExportTarget(AssetPath);
+                if (ExportTarget.Save(JsonObject.ToSharedRef()))
                 {
-                    UE_LOG(LogUAssetWorkbenchExporter, Display, TEXT("Exported: %s -> %s"), *AssetPath, *OutputPath);
+                    UE_LOG(LogUAssetWorkbenchExporter, Display, TEXT("Exported: %s -> %s"), *AssetPath, *ExportTarget.GetPath());
                     ExportedCount++;
                 }
             }
@@ -88,10 +90,10 @@ int32 UMaterialExportCommandlet::Main(const FString& Params)
             TSharedPtr<FJsonObject> JsonObject = ExportMaterial(Material);
             if (JsonObject.IsValid())
             {
-                FString OutputPath = UAssetWorkbench::GetExportPath(AssetPath);
-                if (UAssetWorkbench::SaveJsonToFile(JsonObject.ToSharedRef(), OutputPath))
+                UAssetWorkbench::FExportTarget ExportTarget(AssetPath);
+                if (ExportTarget.Save(JsonObject.ToSharedRef()))
                 {
-                    UE_LOG(LogUAssetWorkbenchExporter, Display, TEXT("Exported: %s -> %s"), *AssetPath, *OutputPath);
+                    UE_LOG(LogUAssetWorkbenchExporter, Display, TEXT("Exported: %s -> %s"), *AssetPath, *ExportTarget.GetPath());
                     ExportedCount++;
                 }
             }
@@ -121,6 +123,25 @@ TSharedPtr<FJsonObject> UMaterialExportCommandlet::ExportMaterial(UMaterial* Mat
     Root->SetStringField(TEXT("BlendMode"), StaticEnum<EBlendMode>()->GetNameStringByValue(static_cast<int64>(Material->BlendMode)));
     Root->SetBoolField(TEXT("TwoSided"), Material->IsTwoSided());
     Root->SetStringField(TEXT("MaterialDomain"), StaticEnum<EMaterialDomain>()->GetNameStringByValue(static_cast<int64>(Material->MaterialDomain)));
+    Root->SetNumberField(TEXT("OpacityMaskClipValue"), Material->OpacityMaskClipValue);
+    Root->SetBoolField(TEXT("bAutomaticallySetUsageInEditor"), Material->bAutomaticallySetUsageInEditor != 0);
+
+    // Usage flags decide which permutations compile, and EditMaterialAsset writes them, so an export has
+    // to show them. UMaterial::GetUsageName is not exported, hence the reflected property names.
+    TArray<TSharedPtr<FJsonValue>> UsageFlagsArray;
+    for (TFieldIterator<FBoolProperty> It(UMaterial::StaticClass()); It; ++It)
+    {
+        if (!It->GetName().StartsWith(TEXT("bUsedWith")) || It->HasAnyPropertyFlags(CPF_Deprecated))
+        {
+            continue;
+        }
+
+        if (It->GetPropertyValue_InContainer(Material))
+        {
+            UsageFlagsArray.Add(MakeShared<FJsonValueString>(It->GetName()));
+        }
+    }
+    Root->SetArrayField(TEXT("UsageFlags"), UsageFlagsArray);
 
     // Expressions (node graph)
     TArray<TSharedPtr<FJsonValue>> ExpressionsArray;
@@ -242,6 +263,27 @@ TSharedPtr<FJsonObject> UMaterialExportCommandlet::ExportMaterialInstance(UMater
         StaticSwitchArray.Add(MakeShared<FJsonValueObject>(ParamObj));
     }
     Root->SetArrayField(TEXT("StaticSwitchParameters"), StaticSwitchArray);
+
+    // Only the overrides actually flagged, an instance that overrides nothing writes an empty object.
+    const FMaterialInstanceBasePropertyOverrides& Overrides = MaterialInstance->BasePropertyOverrides;
+    TSharedPtr<FJsonObject> OverridesObj = MakeShared<FJsonObject>();
+    if (Overrides.bOverride_BlendMode)
+    {
+        OverridesObj->SetStringField(TEXT("BlendMode"), StaticEnum<EBlendMode>()->GetNameStringByValue(Overrides.BlendMode.GetValue()));
+    }
+    if (Overrides.bOverride_ShadingModel)
+    {
+        OverridesObj->SetStringField(TEXT("ShadingModel"), StaticEnum<EMaterialShadingModel>()->GetNameStringByValue(Overrides.ShadingModel.GetValue()));
+    }
+    if (Overrides.bOverride_TwoSided)
+    {
+        OverridesObj->SetBoolField(TEXT("TwoSided"), Overrides.TwoSided != 0);
+    }
+    if (Overrides.bOverride_OpacityMaskClipValue)
+    {
+        OverridesObj->SetNumberField(TEXT("OpacityMaskClipValue"), Overrides.OpacityMaskClipValue);
+    }
+    Root->SetObjectField(TEXT("BasePropertyOverrides"), OverridesObj);
 
     return Root;
 }

@@ -5,36 +5,11 @@
 
 #include "SanitizeLevelReferenceCommandlet.generated.h"
 
-/*
- * Repoint asset references inside level (.umap) packages: replace every reference
- * to an old asset with a new one, then resave the level. For the LD case where an
- * asset was renamed but the old copy is kept alive, and other levels still import
- * the old path; this rewrites those imports to the new asset so the old copy can
- * be deleted safely afterwards.
- *
- * Both old and new must still exist on disk: FArchiveReplaceObjectRef has to load
- * both to swap the pointer. Run this BEFORE deleting the old assets, never after.
- * Pairs counterpart to AuditLevelReference (audit finds the breakage, this fixes it).
- *
- * Usage:
- *   UnrealEditor-Cmd.exe Project.uproject -run=SanitizeLevelReference
- *       -levels="/Game/Maps/L_A,/Game/Maps/L_B"
- *       -replace="/Game/Old/SM_Arch=/Game/New/SM_Foundation,/Game/Old/MI_X=/Game/New/MI_Y"
- *       [-report="<abs path to report JSON>"]
- *       [-dryrun]
- *
- * Args:
- *   -levels=   Comma-separated level package paths to sanitize.
- *   -replace=  Comma-separated old=new asset path pairs.
- *   -report=   Where to write the report JSON. Defaults under Intermediate/SanitizeLevelReference/.
- *   -dryrun    Count references that would change, write report, but do not modify or save.
- *
- * Per-level error policy: a load / save failure records the level as failed and
- * moves on. The in-memory mutation is discarded on GC; on-disk umap stays untouched.
- *
- * Exit code: 0 = done (or nothing to replace), 1 = at least one level failed or bad args,
- *            2 = editor is running.
- */
+// Repoints asset references inside level packages, then resaves the level, so an old asset kept alive
+// only for other levels' imports can finally be deleted. Both old and new must still be on disk, so this
+// runs before the delete, never after. Pairs with AuditLevelReference, which finds the breakage.
+//   UnrealEditor-Cmd.exe Project.uproject -run=SanitizeLevelReference -levels= -replace= [-report=] [-dryrun]
+// Contract: Docs/Migrate.md
 UCLASS()
 class USanitizeLevelReferenceCommandlet : public UCommandlet
 {

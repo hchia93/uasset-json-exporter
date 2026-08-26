@@ -10,9 +10,8 @@ DECLARE_LOG_CATEGORY_EXTERN(LogUAssetWorkbenchImporter, Log, All);
 DECLARE_LOG_CATEGORY_EXTERN(LogUAssetWorkbenchAuditor, Log, All);
 DECLARE_LOG_CATEGORY_EXTERN(LogUAssetWorkbenchEditor, Log, All);
 
-// Exit codes every commandlet here returns. UE has no standard for this, Commandlet::Main just
-// returns int32. IssuesFound is an audit reporting a clean run that still found something to fix,
-// which is not the same as Failed.
+// Exit codes every commandlet returns. IssuesFound is a run that worked and still found something to
+// fix, which is not Failed.
 enum class EUAssetWorkbenchExitType : int32
 {
     Success = 0,
@@ -40,8 +39,6 @@ namespace UAssetWorkbench
     inline constexpr const TCHAR* MessageLogName = TEXT("UAssetWorkbench");
 
     // Which group a run belongs to. Decides how success is judged and where the result is reported.
-    // Export reads an asset out. Import regenerates one from a spec. Edit changes an existing one to
-    // match an intent. Migrate is asset-level bookkeeping: redirect, resave, replace.
     enum class EGroup : uint8
     {
         Export,
@@ -62,9 +59,8 @@ namespace UAssetWorkbench
     // early-return to avoid fighting the editor for the project lock.
     bool AbortIfLiveEditor();
 
-    // RAII scope: while alive, AbortIfLiveEditor() always returns false. Subsystem
-    // wraps internal commandlet dispatch with this so its own heartbeat doesn't
-    // make the dispatched commandlet refuse to run.
+    // While alive, AbortIfLiveEditor returns false, so the subsystem's own heartbeat cannot make a
+    // commandlet it dispatched refuse to run.
     struct FInternalDispatchScope
     {
         FInternalDispatchScope();

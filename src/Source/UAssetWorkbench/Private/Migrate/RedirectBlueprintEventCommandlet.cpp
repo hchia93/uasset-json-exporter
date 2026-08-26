@@ -70,9 +70,10 @@ int32 URedirectBlueprintEventCommandlet::Main(const FString& Params)
 
     int32 TotalRedirected = 0;
     int32 BlueprintsChanged = 0;
+    bool bSaveFailed = false;
     for (const FString& AssetPath : AssetPaths)
     {
-        const int32 Redirected = RedirectBlueprintEvents(AssetPath, OwnerClass, OldEvent, NewEvent, bApply);
+        const int32 Redirected = RedirectBlueprintEvents(AssetPath, OwnerClass, OldEvent, NewEvent, bApply, bSaveFailed);
         if (Redirected > 0)
         {
             ++BlueprintsChanged;
@@ -82,16 +83,18 @@ int32 URedirectBlueprintEventCommandlet::Main(const FString& Params)
 
     UE_LOG(LogUAssetWorkbenchMigrator, Display, TEXT("Done. Redirected %d event(s) across %d/%d blueprint(s) %s"),
         TotalRedirected, BlueprintsChanged, AssetPaths.Num(), bApply ? TEXT("(saved)") : TEXT("(dry run, not saved)"));
-    return ToExitCode(EUAssetWorkbenchExitType::Success);
+
+    const EUAssetWorkbenchExitType ExitType = bSaveFailed ? EUAssetWorkbenchExitType::Failed : EUAssetWorkbenchExitType::Success;
+    return ToExitCode(ExitType);
 }
 
-int32 URedirectBlueprintEventCommandlet::RedirectBlueprintEvents(const FString& AssetPath, UClass* OwnerClass, FName OldEvent, FName NewEvent, bool bApply) const
+int32 URedirectBlueprintEventCommandlet::RedirectBlueprintEvents(const FString& AssetPath, UClass* OwnerClass, FName OldEvent, FName NewEvent, bool bApply, bool& OutSaveFailed) const
 {
     UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *AssetPath);
     if (!Blueprint)
     {
         UE_LOG(LogUAssetWorkbenchMigrator, Warning, TEXT("Failed to load Blueprint: %s"), *AssetPath);
-        return 0;
+        return ToExitCode(EUAssetWorkbenchExitType::Success);
     }
 
     int32 Redirected = 0;
@@ -119,9 +122,8 @@ int32 URedirectBlueprintEventCommandlet::RedirectBlueprintEvents(const FString& 
             continue;
         }
 
-        // Collect first, the node list is mutated below.
-        // The orphaned override surfaces either as a converted custom event (CustomFunctionName)
-        // or as a still-bound event node with a dangling EventReference to the old name.
+        // Collect first, the node list is mutated below. The orphaned override surfaces as a converted
+        // custom event or as a still-bound event node with a dangling EventReference to the old name.
         TArray<UEdGraphNode*> Orphans;
         for (UEdGraphNode* Node : Graph->Nodes)
         {
@@ -221,7 +223,7 @@ int32 URedirectBlueprintEventCommandlet::RedirectBlueprintEvents(const FString& 
     if (Redirected == 0)
     {
         UE_LOG(LogUAssetWorkbenchMigrator, Warning, TEXT("%s: no orphaned event '%s' found."), *Blueprint->GetName(), *OldEvent.ToString());
-        return 0;
+        return ToExitCode(EUAssetWorkbenchExitType::Success);
     }
 
     FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
@@ -233,6 +235,7 @@ int32 URedirectBlueprintEventCommandlet::RedirectBlueprintEvents(const FString& 
     }
 
     const bool bSaved = UAssetWorkbench::CompileAndSavePackage(Blueprint);
+    OutSaveFailed |= !bSaved;
 
     UE_LOG(LogUAssetWorkbenchMigrator, Display, TEXT("%s: %d redirect(s) %s"), *Blueprint->GetName(), Redirected, bSaved ? TEXT("compiled + SAVED") : TEXT("compiled, SAVE FAILED"));
 
