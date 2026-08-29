@@ -27,7 +27,7 @@ Five problems, five capability groups.
 | Export | Read uasset structure, write JSON | JSON under `Intermediate/UAssetExport` | 11 |
 | Import | Read a JSON spec, write back to or create uassets | modified or new uassets | 3 |
 | Edit | Change an existing uasset to match an intent | modified uassets | 4 |
-| Migrate | Fix references after a C++ or asset rename | modified uassets | 7 |
+| Migrate | Fix references after a C++ or asset rename | modified uassets | 8 |
 | Audit | Read-only checks producing a report | report JSON | 4 |
 
 The group is decided by the run name: suffix `Export` is the Export group, suffix `Import` and prefix `Create` are the Import group, prefix `Edit` is the Edit group, prefix `Audit` is the Audit group, everything else is Migrate. Naming-wise `Import` and `Export` are nouns used as suffixes, every other verb leads.
@@ -41,7 +41,7 @@ Every operation converges on the same calling contract. The heartbeat file `Save
 | Open | Write a pending task, the in-editor subsystem runs it in-process | One Message Log page per run, a toast when that run reports warnings or errors |
 | Closed | Launch `UnrealEditor-Cmd` to run the commandlet | log |
 
-Both paths produce identical output, the caller does not need to care whether the editor is open.
+The read-only groups, Export and Audit, produce identical output on either path. The write groups, Import, Edit and Migrate, must run with the editor open. A package saved from a standalone commandlet process lands without the imports the asset registry builds its dependency graph from. The asset itself is fine, it opens and runs, but Reference Viewer shows it isolated until something saves it again from inside the editor. [Docs/Migrate.md](Docs/Migrate.md) carries the detail and the recovery step.
 
 What the routing buys: the five groups share one call entry and one output convention, so workflows compose, export the structure, analyze offline, write back to the asset, audit to verify, instead of every added tool bringing its own way of being called. Adding a commandlet adds a capability, the contract does not change.
 
@@ -165,7 +165,7 @@ One EdGraph serializer backs `BlueprintEdGraphExport`, `AnimBlueprintExport` and
 
 ```json
 {
-    "ExporterVersion": "2.4.0",
+    "ExporterVersion": "2.5.0",
     "ExportType": "BlueprintEdGraph",
     "Blueprint": "BP_Foo",
     "ParentClass": "PlayerController",
@@ -195,7 +195,7 @@ One EdGraph serializer backs `BlueprintEdGraphExport`, `AnimBlueprintExport` and
 
 ```json
 {
-    "ExporterVersion": "2.4.0",
+    "ExporterVersion": "2.5.0",
     "ExportType": "AnimMontage",
     "AssetName": "AM_Foo_Attack_01",
     "SequenceLength": 0.543,
@@ -243,7 +243,7 @@ One EdGraph serializer backs `BlueprintEdGraphExport`, `AnimBlueprintExport` and
 
 ```json
 {
-    "ExporterVersion": "2.4.0",
+    "ExporterVersion": "2.5.0",
     "ExportType": "AnimBlueprint",
     "StateMachines": [
         {
@@ -284,7 +284,7 @@ The transition keys are the ones `EditBlueprint` reads under `StateMachines`, so
 
 ```json
 {
-    "ExporterVersion": "2.4.0",
+    "ExporterVersion": "2.5.0",
     "ExportType": "WidgetLayout",
     "WidgetBlueprint": "WBP_Foo",
     "WidgetTree": {
@@ -316,7 +316,7 @@ The transition keys are the ones `EditBlueprint` reads under `StateMachines`, so
 
 ```json
 {
-    "ExporterVersion": "2.4.0",
+    "ExporterVersion": "2.5.0",
     "ExportType": "DataTable",
     "DataTableName": "DT_Foo",
     "RowStruct": "AttributeMetaData",
@@ -343,7 +343,7 @@ The transition keys are the ones `EditBlueprint` reads under `StateMachines`, so
 
 ```json
 {
-    "ExporterVersion": "2.4.0",
+    "ExporterVersion": "2.5.0",
     "ExportType": "Material",
     "MaterialName": "M_Foo",
     "ShadingModel": "MSM_DefaultLit",
@@ -395,7 +395,7 @@ MaterialInstance exports the parameter override table.
 
 ```json
 {
-    "ExporterVersion": "2.4.0",
+    "ExporterVersion": "2.5.0",
     "ExportType": "Level",
     "LevelName": "L_Foo",
     "WorldSettings": {
@@ -445,7 +445,7 @@ ISM / HISM / Foliage components with more than 200 instances export only the cou
 
 ```json
 {
-    "ExporterVersion": "2.4.0",
+    "ExporterVersion": "2.5.0",
     "ExportType": "NiagaraSystem",
     "SystemName": "NS_Foo",
     "ExposedParameters": [],
@@ -680,7 +680,7 @@ Both consume the `Spec` block their audit emits verbatim, so `AuditTexture` into
 </details>
 
 <details>
-<summary><b>Migrate</b>, 7 commandlets</summary>
+<summary><b>Migrate</b>, 8 commandlets</summary>
 
 CoreRedirects covers the call side only, the implementation side and the consumer side inside Blueprint graphs are out of its range. A renamed interface event degrades a BP override into an orphaned custom event and the event stops firing, a renamed delegate parameter leaves a dangling pin on the binding node. Both still compile, and neither is findable by eye in a large project.
 
@@ -693,6 +693,7 @@ CoreRedirects covers the call side only, the implementation side and the consume
 | `ResaveAsset` | Forces load, compile, save so load-time fixups land on disk, after which that CoreRedirect can be dropped, supports Blueprint and map | writes directly |
 | `SanitizeLevelReference` | Repoints every reference to an old asset inside a level at the new asset, then resaves that level | writes directly, `-dryrun` only counts |
 | `DuplicateAsset` | Copies assets to new paths, the copy is independent and nothing is retargeted, and an existing destination is an error rather than an overwrite | dry run |
+| `RenameAsset` | Renames or moves assets and repoints every referencer, hard and soft. Reports the referencer count per asset before and after, so a rename that dropped a reference surfaces instead of passing silently. Redirectors the rename leaves behind are fixed up and deleted unless `-keepredirectors` is passed | dry run |
 
 The scanning commandlets list each Blueprint, event or node hit and how many wire groups would move, then take `-apply` to compile and save once it looks right. A scan with zero hits warns, check the `-OwnerClass` and the old name spelling first. Node ids for `DeleteBlueprintNode` are copied verbatim out of a `BlueprintEdGraphExport -graphs` output, and ids that matched nothing are reported at the end rather than passing silently.
 
@@ -802,7 +803,7 @@ Prerequisites: Unreal Engine 5.7, and the plugin must be compiled with the proje
 | `Docs/Export.md` | Export group, 11 commandlets, every JSON field |
 | `Docs/Import.md` | Import group, 3 commandlets, spec format |
 | `Docs/Edit.md` | Edit group, 4 commandlets, every spec key and every layout op |
-| `Docs/Migrate.md` | Migrate group, 7 commandlets |
+| `Docs/Migrate.md` | Migrate group, 8 commandlets |
 | `Docs/Audit.md` | Audit group, 4 commandlets, full rule tables, stream metric workflow |
 
 These docs are reference material for agents to read. Where behavior and documentation disagree, the source wins, the block comment at the top of each commandlet header carries the full contract.
@@ -819,7 +820,7 @@ UE is only the proving ground, the three reusable parts do not depend on it.
 
 ## Version
 
-Current version: **2.4.0**
+Current version: **2.5.0**
 
 Defined in `src/Source/UAssetWorkbench/Public/UAssetWorkbenchVersion.h`, and embedded in the `ExporterVersion` field of every exported JSON.
 

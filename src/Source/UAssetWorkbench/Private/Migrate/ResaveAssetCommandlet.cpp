@@ -46,6 +46,7 @@ int32 UResaveAssetCommandlet::Main(const FString& Params)
     }
 
     UE_LOG(LogUAssetWorkbenchMigrator, Display, TEXT("Done. Resaved %d/%d asset(s)."), Saved, AssetPaths.Num());
+    UAssetWorkbench::WarnIfWrittenOutsideEditor();
     return ToExitCode(EUAssetWorkbenchExitType::Success);
 }
 

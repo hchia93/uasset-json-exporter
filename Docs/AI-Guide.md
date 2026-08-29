@@ -51,6 +51,7 @@
 | delegate 参数改名后绑定处留下悬空连线 | `RedirectBlueprintPin` | Migrate |
 | 图逻辑搬进 C++ 后，BP 图里作废的那几个节点要删掉 | `DeleteBlueprintNode` | Migrate |
 | 批量改 Blueprint 的父类 | `ReparentBlueprint` | Migrate |
+| 资产改名或搬目录，引用要跟着走 | `RenameAsset` | Migrate |
 | 在动手前先复制一份资产做对照 | `DuplicateAsset` | Migrate |
 | 让 CoreRedirect 解析过的引用落盘，好撤掉那条 redirect | `ResaveAsset` | Migrate |
 | 资产改名后，把别的 level 的 import 改指到新资产 | `SanitizeLevelReference` | Migrate |
@@ -65,6 +66,8 @@
 拿不准 Blueprint 里的问题出在 C++ 还是图上时，先 `BlueprintEdGraphExport` 看图，再决定。
 
 破损引用先 audit 后 sanitize: `AuditLevelReference` 拿到明细，再用 `SanitizeLevelReference` 逐对重指向。
+
+写入类的 run（Migrate / Import / Edit）在编辑器开着时跑，脚本会走 in-editor 队列。编辑器关着时脚本 fallback 到独立进程，写出的包 asset registry 建不出依赖边，细节见 [Migrate.md](Migrate.md)。
 
 ## 调用模板
 

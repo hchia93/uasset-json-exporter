@@ -313,6 +313,24 @@ bool UAssetWorkbench::CompileAndSavePackage(UObject* Asset, bool bCompileBluepri
     return UPackage::SavePackage(Package, nullptr, *FileName, SaveArgs);
 }
 
+void UAssetWorkbench::WarnIfWrittenOutsideEditor()
+{
+    // The queue path runs this same code inside the editor, where IsRunningCommandlet is false.
+    if (!IsRunningCommandlet())
+    {
+        return;
+    }
+
+    static bool bWarned = false;
+    if (bWarned)
+    {
+        return;
+    }
+
+    bWarned = true;
+    UE_LOG(LogUAssetWorkbenchCore, Warning, TEXT("Packages were written from a standalone commandlet, so the asset registry will read no dependency edges for them and Reference Viewer will show them isolated. Open the editor and run ResaveAsset on them through the in-editor queue."));
+}
+
 namespace
 {
     // Stamped into every export name so a re-export of an older revision cannot overwrite a newer capture,

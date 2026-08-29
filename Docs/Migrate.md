@@ -22,10 +22,21 @@ CoreRedirects 只覆盖调用侧: call 节点、变量引用、类引用。Bluep
 | `DeleteBlueprintNode` | 按 node id 删图节点，图逻辑搬进 C++ 之后的清理步骤。删除会切断该节点所有连线，不重新接线。schema 拒删的节点，function entry 与 result，报出后跳过 | dry run |
 | `ReparentBlueprint` | 改 Blueprint 的父类 | 直接执行并保存 |
 | `DuplicateAsset` | 把资产复制到新路径。副本独立，内部引用仍指向原来指的东西，不做重定向。目标已存在是错误，重跑不会覆盖掉已经改过的副本 | dry run |
+| `RenameAsset` | 改资产名或搬路径，硬引用与软引用一起重指。逐个资产报改名前后的 referencer 数，掉引用会报错而不是静默通过。留下的 redirector 默认 fixup 后删除 | dry run |
 | `ResaveAsset` | 强制 load、compile、save，让 load 期的 fixup 落盘，例如已被 CoreRedirect 解析的引用。之后就能撤掉那条 redirect。支持 Blueprint 和 map | 直接保存 |
 | `SanitizeLevelReference` | 把 level 里对旧资产的每一处引用换成新资产，然后 resave 这个 level | 直接保存，`-dryrun` 只统计 |
 
 执行后被改动的 uasset 会出现在版本控制的工作副本里。
+
+## 写入类的 run 要在编辑器开着时跑
+
+`run_commandlet.sh` 优先走 in-editor 队列，编辑器关着才 fallback 到独立进程直跑。**Migrate / Import / Edit 这几组必须走队列**，独立进程直跑写出的包缺东西。
+
+症状：资产本身完好，打开、渲染、PIE 全正常，但 Reference Viewer 里它是个孤立节点，一条依赖边都没有。asset registry 的依赖图读的是包头 ImportMap，独立进程保存时 harvest 收集不全，那几条 import 就没落盘。同一个包在编辑器进程里再存一次，边全部回来，包也大几 KB。
+
+已经踩了的补救: 编辑器开着，对受影响的资产跑一次 `ResaveAsset`（走队列），然后关掉 Reference Viewer 重开。
+
+Export 与 Audit 是只读的，编辑器开不开都行。
 
 ## 调用
 
@@ -46,6 +57,18 @@ bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh \
     RedirectBlueprintPin "/Game/Blueprints/BP_Foo" 10 600 \
     '-OldPin="Amount" -NewPin="DeltaAmount"'
 ```
+
+`RenameAsset`。目标目录不必先存在。
+
+```bash
+bash Plugins/UAssetWorkbench/scripts/run_commandlet.sh     "<UE_PATH>" "<PROJECT_DIR>/MyProject.uproject"     RenameAsset "" 10 600     '-pairs="/Game/UI/Debug/WBP_DebugMenu>/Game/UI/Cheat/WBP_CheatMenu" -apply'
+```
+
+加 `-keepredirectors` 保留 redirector，跨仓库引用还没跟上时才需要。默认删掉，SVN 工作副本里留 redirector 就是垃圾。
+
+C++ 类改名同时发生时，先在 `DefaultEngine.ini` 的 `[CoreRedirects]` 写好 class redirect 再跑，否则资产加载时找不到父类，rename 会在 load 阶段就失败。
+
+ini 或 CDO 有软引用指向待改名资产时，`FAssetRenameManager` 会弹一个 OkCancel 确认框。commandlet 跑在 unattended 下，那个框必然答 Cancel，rename 直接返回失败。**先把 ini 指到目标路径再跑**，目标此刻还不存在没关系，软引用解析成 null 不报错。日志里搜 `Message dialog closed` 能确认是不是撞上这条。
 
 `DeleteBlueprintNode`。node id 从 `BlueprintEdGraphExport` 加 `-graphs` 的导出产物里的 `NodeId` 原样抄，纯十六进制加逗号，不需要引号。
 

@@ -27,7 +27,7 @@
 | Export | 读 uasset 结构导出 JSON | `Intermediate/UAssetExport` 下的 JSON | 11 |
 | Import | 读 JSON spec 写回或创建 uasset | 被修改或新建的 uasset | 3 |
 | Edit | 按意图修改既有 uasset | 被修改的 uasset | 4 |
-| Migrate | C++ 或资产改名后修复引用 | 被修改的 uasset | 7 |
+| Migrate | C++ 或资产改名后修复引用 | 被修改的 uasset | 8 |
 | Audit | 只读检查产出报告 | 报告 JSON | 4 |
 
 组别由 run 名决定: 后缀 `Export` 是 Export 组，后缀 `Import` 与前缀 `Create` 是 Import 组，前缀 `Edit` 是 Edit 组，前缀 `Audit` 是 Audit 组，其余是 Migrate 组。命名上 `Import` 与 `Export` 是名词做后缀，其余动词在前。
@@ -41,7 +41,7 @@
 | 开着 | 写 pending task，编辑器内的 subsystem 进程内执行 | 每个 run 在 Message Log 开一页，该 run 有 warning 或 error 才弹 toast |
 | 关着 | 起 `UnrealEditor-Cmd` 跑 commandlet | log |
 
-两条路产出一致，调用方不需要关心编辑器开没开。
+只读组 Export 与 Audit 两条路产出一致。写入组 Import、Edit、Migrate 必须在编辑器开着时跑。独立 commandlet 进程存出来的包，缺 asset registry 建依赖图要读的那几条 import。资产本身没问题，打开能用，但 Reference Viewer 里它是个孤立节点，直到有人在编辑器里再存一次。细节与补救步骤见 [Docs/Migrate.md](Docs/Migrate.md)。
 
 这套路由的意义: 五组能力共享同一个调用入口和同一套产出约定，工作流可以按组合拼装，导出结构，离线分析，写回资产，审计验证，而不是每加一个工具就多一种调用方式。加一个 commandlet 就是加一个能力，契约不变。
 
@@ -165,7 +165,7 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
 
 ```json
 {
-    "ExporterVersion": "2.4.0",
+    "ExporterVersion": "2.5.0",
     "ExportType": "BlueprintEdGraph",
     "Blueprint": "BP_Foo",
     "ParentClass": "PlayerController",
@@ -195,7 +195,7 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
 
 ```json
 {
-    "ExporterVersion": "2.4.0",
+    "ExporterVersion": "2.5.0",
     "ExportType": "AnimMontage",
     "AssetName": "AM_Foo_Attack_01",
     "SequenceLength": 0.543,
@@ -243,7 +243,7 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
 
 ```json
 {
-    "ExporterVersion": "2.4.0",
+    "ExporterVersion": "2.5.0",
     "ExportType": "AnimBlueprint",
     "StateMachines": [
         {
@@ -284,7 +284,7 @@ transition 的键就是 `EditBlueprint` 在 `StateMachines` 下读的那套，�
 
 ```json
 {
-    "ExporterVersion": "2.4.0",
+    "ExporterVersion": "2.5.0",
     "ExportType": "WidgetLayout",
     "WidgetBlueprint": "WBP_Foo",
     "WidgetTree": {
@@ -316,7 +316,7 @@ transition 的键就是 `EditBlueprint` 在 `StateMachines` 下读的那套，�
 
 ```json
 {
-    "ExporterVersion": "2.4.0",
+    "ExporterVersion": "2.5.0",
     "ExportType": "DataTable",
     "DataTableName": "DT_Foo",
     "RowStruct": "AttributeMetaData",
@@ -343,7 +343,7 @@ transition 的键就是 `EditBlueprint` 在 `StateMachines` 下读的那套，�
 
 ```json
 {
-    "ExporterVersion": "2.4.0",
+    "ExporterVersion": "2.5.0",
     "ExportType": "Material",
     "MaterialName": "M_Foo",
     "ShadingModel": "MSM_DefaultLit",
@@ -395,7 +395,7 @@ MaterialInstance 导出参数覆写表。
 
 ```json
 {
-    "ExporterVersion": "2.4.0",
+    "ExporterVersion": "2.5.0",
     "ExportType": "Level",
     "LevelName": "L_Foo",
     "WorldSettings": {
@@ -445,7 +445,7 @@ ISM / HISM / Foliage 组件的实例数超过 200 时只导出数量、包围盒
 
 ```json
 {
-    "ExporterVersion": "2.4.0",
+    "ExporterVersion": "2.5.0",
     "ExportType": "NiagaraSystem",
     "SystemName": "NS_Foo",
     "ExposedParameters": [],
@@ -680,7 +680,7 @@ headless 下 Slate 没量过任何东西，所以 `Layout` 的节点尺寸是从
 </details>
 
 <details>
-<summary><b>Migrate</b>，7 个 commandlet</summary>
+<summary><b>Migrate</b>，8 个 commandlet</summary>
 
 CoreRedirects 只覆盖调用侧，Blueprint 图里的实现侧与消费侧不在它的射程内。改名的 interface event 会让 BP override 退化成孤立的 custom event，事件不再触发；改名的 delegate 参数会在绑定节点上留下悬空 pin。两类都编译得过去，靠人眼在大项目里扫不出来。
 
@@ -693,6 +693,7 @@ CoreRedirects 只覆盖调用侧，Blueprint 图里的实现侧与消费侧不�
 | `ResaveAsset` | 强制 load、compile、save，让 load 期的 fixup 落盘，之后就能撤掉那条 CoreRedirect，支持 Blueprint 与 map | 直接落盘 |
 | `SanitizeLevelReference` | 把 level 里对旧资产的每一处引用换成新资产，然后 resave 这个 level | 直接落盘，`-dryrun` 只统计 |
 | `DuplicateAsset` | 把资产复制到新路径，副本独立，内部引用不做重定向，目标已存在是错误而不是覆盖 | dry run |
+| `RenameAsset` | 改资产名或搬路径，硬引用与软引用一起重指。逐个资产报改名前后的 referencer 数，掉引用会报错而不是静默通过。留下的 redirector 默认 fixup 后删除 | dry run |
 
 只扫描的那几个逐条列出命中的 Blueprint、事件或节点、以及会搬多少组连线，确认无误再补 `-apply` 编译并保存。扫描一条都没命中时会给 warning，先核对 `-OwnerClass` 与旧名拼写。`DeleteBlueprintNode` 的 node id 从 `BlueprintEdGraphExport -graphs` 的产物里原样抄，没命中的 id 会在结尾报出来，不会静默通过。
 
@@ -802,7 +803,7 @@ workbench 走 commandlet 加引擎稳定 API，绕开正在演进的那一层。
 | `Docs/Export.md` | Export 组，11 个 commandlet，每个 JSON 字段 |
 | `Docs/Import.md` | Import 组，3 个 commandlet，spec 格式 |
 | `Docs/Edit.md` | Edit 组，4 个 commandlet，每个 spec key 与每个 layout op |
-| `Docs/Migrate.md` | Migrate 组，7 个 commandlet |
+| `Docs/Migrate.md` | Migrate 组，8 个 commandlet |
 | `Docs/Audit.md` | Audit 组，4 个 commandlet，完整规则表与 stream metric 工作流 |
 
 这些文档是给 agent 读的参考。调用行为与文档描述不符时以源码为准，每个 commandlet header 顶部的块注释写了完整契约。
@@ -819,7 +820,7 @@ UE 只是验证场，三样可复用的东西不依赖它。
 
 ## 版本
 
-当前版本: **2.4.0**
+当前版本: **2.5.0**
 
 定义在 `src/Source/UAssetWorkbench/Public/UAssetWorkbenchVersion.h`，同时嵌进每份导出 JSON 的 `ExporterVersion` 字段。
 

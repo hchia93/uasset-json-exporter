@@ -42,6 +42,11 @@ namespace UAssetWorkbench
     // A Blueprint that comes out of the compile in error is not saved, the call returns false instead.
     bool CompileAndSavePackage(UObject* Asset, bool bCompileBlueprint = true);
 
+    // A package written from a standalone commandlet process lands without the imports the asset registry
+    // builds its dependency graph from. The asset itself is fine, it opens and runs, but Reference Viewer
+    // shows it isolated until something saves it again from inside the editor. Warns once per run.
+    void WarnIfWrittenOutsideEditor();
+
     // Property path takes "Array[2].Field" to reach inside arrays, structs and instanced sub-objects. A
     // string value goes through ImportText, the exporter's own format, anything else through the converter.
     int32 ApplyProperties(UObject* Target, const TSharedPtr<FJsonObject>& Properties, int32& OutFailures);
