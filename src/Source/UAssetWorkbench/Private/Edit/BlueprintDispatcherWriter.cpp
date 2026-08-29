@@ -48,19 +48,6 @@ namespace
         return FString::Join(Names, TEXT(", "));
     }
 
-    UK2Node_FunctionEntry* FindEntryNode(const UEdGraph* Graph)
-    {
-        for (UEdGraphNode* Node : Graph->Nodes)
-        {
-            if (UK2Node_FunctionEntry* Entry = Cast<UK2Node_FunctionEntry>(Node))
-            {
-                return Entry;
-            }
-        }
-
-        return nullptr;
-    }
-
     class FBlueprintDispatcherWriter : public IBlueprintWriter
     {
     public:
@@ -217,7 +204,7 @@ namespace
                 return;
             }
 
-            if (UK2Node_FunctionEntry* Entry = FindEntryNode(Graph))
+            if (UK2Node_FunctionEntry* Entry = BlueprintEdit::FindEntryNode(Graph))
             {
                 Context.NodesById.Add(Id, Entry);
             }
@@ -301,7 +288,7 @@ namespace
                 return false;
             }
 
-            UK2Node_FunctionEntry* Entry = FindEntryNode(Graph);
+            UK2Node_FunctionEntry* Entry = BlueprintEdit::FindEntryNode(Graph);
             if (!Entry)
             {
                 UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: dispatcher '%s' has no entry node to carry a signature"), *Context.AssetPath, *Graph->GetName());

@@ -52,7 +52,8 @@ namespace UAssetWorkbench
     // both write assets. Repair runs carry no marker, so Migrate is the fallback.
     EGroup ResolveGroup(const FString& RunName);
 
-    // Returns true if a recent heartbeat is present (in-editor queue subsystem active).
+    // Returns true if the in-editor queue subsystem is active. A fresh heartbeat says so outright, a
+    // stale one falls back to the pid the file carries, since the stamping ticker stops during a stall.
     bool IsLiveEditorPresent();
 
     // Logs and returns true if a live editor was detected. Commandlets call this and

@@ -3,14 +3,14 @@
 #include "CoreMinimal.h"
 
 // File-based contract between external wrappers and the in-editor queue subsystem, under ProjectDir.
-//   Saved/UAssetExportQueue/.alive                  heartbeat, mtime touched periodically
-//   Saved/UAssetExportQueue/pending/<uuid>.json     wrapper writes task here
-//   Saved/UAssetExportQueue/processing/<uuid>.json  subsystem claims via rename
-//   Saved/UAssetExportQueue/done/<uuid>.json        subsystem writes result here
+//   Saved/UAssetWorkbenchTaskQueue/.alive                  heartbeat, holds the editor pid, mtime touched periodically
+//   Saved/UAssetWorkbenchTaskQueue/pending/<uuid>.json     wrapper writes task here
+//   Saved/UAssetWorkbenchTaskQueue/processing/<uuid>.json  subsystem claims via rename
+//   Saved/UAssetWorkbenchTaskQueue/done/<uuid>.json        subsystem writes result here
 
-namespace UAssetExportQueue
+namespace UAssetWorkbenchTaskQueue
 {
-    inline constexpr const TCHAR* QueueRootRelative = TEXT("Saved/UAssetExportQueue");
+    inline constexpr const TCHAR* QueueRootRelative = TEXT("Saved/UAssetWorkbenchTaskQueue");
     inline constexpr const TCHAR* PendingSubdir     = TEXT("pending");
     inline constexpr const TCHAR* ProcessingSubdir  = TEXT("processing");
     inline constexpr const TCHAR* DoneSubdir        = TEXT("done");

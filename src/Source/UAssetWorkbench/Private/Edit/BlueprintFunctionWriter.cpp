@@ -88,19 +88,6 @@ namespace
         return FString::Join(Owners, TEXT(" and "));
     }
 
-    UK2Node_FunctionEntry* FindEntryNode(const UEdGraph* Graph)
-    {
-        for (UEdGraphNode* Node : Graph->Nodes)
-        {
-            if (UK2Node_FunctionEntry* Entry = Cast<UK2Node_FunctionEntry>(Node))
-            {
-                return Entry;
-            }
-        }
-
-        return nullptr;
-    }
-
     UK2Node_FunctionResult* FindResultNode(const UEdGraph* Graph)
     {
         for (UEdGraphNode* Node : Graph->Nodes)
@@ -232,7 +219,7 @@ namespace
                 return;
             }
 
-            if (UK2Node_FunctionEntry* Entry = FindEntryNode(Graph))
+            if (UK2Node_FunctionEntry* Entry = BlueprintEdit::FindEntryNode(Graph))
             {
                 Context.NodesById.Add(Id, Entry);
             }
@@ -317,7 +304,7 @@ namespace
 
         bool ApplySignature(FBlueprintEditContext& Context, UEdGraph* Graph, const TSharedPtr<FJsonObject>& Signature) const
         {
-            UK2Node_FunctionEntry* Entry = FindEntryNode(Graph);
+            UK2Node_FunctionEntry* Entry = BlueprintEdit::FindEntryNode(Graph);
             if (!Entry)
             {
                 UE_LOG(LogUAssetWorkbenchEditor, Error, TEXT("%s: function '%s' has no entry node to carry a signature"), *Context.AssetPath, *Graph->GetName());

@@ -1,10 +1,12 @@
 #include "UAssetWorkbenchModule.h"
 #include "UAssetWorkbenchVersion.h"
-#include "AssetExportQueueProtocol.h"
+#include "TaskQueueProtocol.h"
 
 #include "HAL/FileManager.h"
+#include "HAL/PlatformProcess.h"
 #include "MessageLogModule.h"
 #include "Misc/DateTime.h"
+#include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/Timespan.h"
 #include "Modules/ModuleManager.h"
@@ -76,8 +78,8 @@ bool UAssetWorkbench::IsLiveEditorPresent()
 {
     const FString AlivePath = FPaths::Combine(
         FPaths::ProjectDir(),
-        UAssetExportQueue::QueueRootRelative,
-        UAssetExportQueue::AliveFileName);
+        UAssetWorkbenchTaskQueue::QueueRootRelative,
+        UAssetWorkbenchTaskQueue::AliveFileName);
 
     if (!IFileManager::Get().FileExists(*AlivePath))
     {
@@ -91,7 +93,26 @@ bool UAssetWorkbench::IsLiveEditorPresent()
     }
 
     const FTimespan Age = FDateTime::UtcNow() - ModTime;
-    return Age.GetTotalSeconds() <= UAssetExportQueue::HeartbeatFreshnessSeconds;
+    if (Age.GetTotalSeconds() <= UAssetWorkbenchTaskQueue::HeartbeatFreshnessSeconds)
+    {
+        return true;
+    }
+
+    // The ticker that stamps the file stops during a synchronous editor stall, registry scan or shader
+    // compile, so a stale mtime is not proof of death. The pid the editor wrote there is.
+    FString PidText;
+    if (!FFileHelper::LoadFileToString(PidText, *AlivePath))
+    {
+        return false;
+    }
+
+    const int32 EditorPid = FCString::Atoi(*PidText.TrimStartAndEnd());
+    if (EditorPid <= 0)
+    {
+        return false;
+    }
+
+    return FPlatformProcess::IsApplicationRunning(static_cast<uint32>(EditorPid));
 }
 
 static int32 GInternalDispatchDepth = 0;

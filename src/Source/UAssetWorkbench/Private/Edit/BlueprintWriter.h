@@ -14,6 +14,7 @@ class UAnimStateTransitionNode;
 class UBlueprint;
 class UEdGraph;
 class UK2Node_EditablePinBase;
+class UK2Node_FunctionEntry;
 
 // One Blueprint, carried across every writer of a single target. NodesById is the reason it exists, the
 // Graph writer registers spec Ids and Layout addresses those instead of NodeGuids nobody knows yet.
@@ -56,6 +57,8 @@ TUniquePtr<IBlueprintWriter> MakeBlueprintStateMachineWriter();
 namespace BlueprintEdit
 {
     UEdGraph* FindGraph(UBlueprint* Blueprint, const FString& GraphName);
+
+    UK2Node_FunctionEntry* FindEntryNode(const UEdGraph* Graph);
 
     // Pre-existing nodes answer to their 32-hex NodeGuid, the same one BlueprintEdGraphExport prints.
     void RegisterExistingNodes(UEdGraph* Graph, TMap<FString, UEdGraphNode*>& OutNodesById);

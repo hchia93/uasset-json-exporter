@@ -3,13 +3,13 @@
 #include "CoreMinimal.h"
 #include "Containers/Ticker.h"
 #include "EditorSubsystem.h"
-#include "AssetExportQueueSubsystem.generated.h"
+#include "TaskQueueSubsystem.generated.h"
 
 class SNotificationItem;
 struct FFileChangeData;
 
 UCLASS()
-class UAssetExportQueueSubsystem : public UEditorSubsystem
+class UAssetWorkbenchTaskQueueSubsystem : public UEditorSubsystem
 {
     GENERATED_BODY()
 
@@ -46,5 +46,5 @@ private:
     FTSTicker::FDelegateHandle m_HeartbeatHandle;
     FDelegateHandle m_DirectoryWatcherHandle;
     FString m_WatchedDirectory;
-    bool m_Processing = false;
+    bool m_bProcessing = false;
 };

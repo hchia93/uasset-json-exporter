@@ -34,7 +34,7 @@
 
 ## 通道与架构
 
-所有操作收敛成同一套调用契约。heartbeat 文件 `Saved/UAssetExportQueue/.alive` 决定路由。
+所有操作收敛成同一套调用契约。heartbeat 文件 `Saved/UAssetWorkbenchTaskQueue/.alive` 按 mtime 决定路由，mtime 因编辑器同步卡顿变旧时，改查文件里记的编辑器进程 id。
 
 | 编辑器状态 | 走哪条路 | 反馈 |
 | --- | --- | --- |
@@ -165,7 +165,7 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
 
 ```json
 {
-    "ExporterVersion": "2.5.0",
+    "ExporterVersion": "2.5.1",
     "ExportType": "BlueprintEdGraph",
     "Blueprint": "BP_Foo",
     "ParentClass": "PlayerController",
@@ -195,7 +195,7 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
 
 ```json
 {
-    "ExporterVersion": "2.5.0",
+    "ExporterVersion": "2.5.1",
     "ExportType": "AnimMontage",
     "AssetName": "AM_Foo_Attack_01",
     "SequenceLength": 0.543,
@@ -243,7 +243,7 @@ MSYS_NO_PATHCONV=1 bash src/scripts/run_commandlet.sh \
 
 ```json
 {
-    "ExporterVersion": "2.5.0",
+    "ExporterVersion": "2.5.1",
     "ExportType": "AnimBlueprint",
     "StateMachines": [
         {
@@ -284,7 +284,7 @@ transition 的键就是 `EditBlueprint` 在 `StateMachines` 下读的那套，�
 
 ```json
 {
-    "ExporterVersion": "2.5.0",
+    "ExporterVersion": "2.5.1",
     "ExportType": "WidgetLayout",
     "WidgetBlueprint": "WBP_Foo",
     "WidgetTree": {
@@ -316,7 +316,7 @@ transition 的键就是 `EditBlueprint` 在 `StateMachines` 下读的那套，�
 
 ```json
 {
-    "ExporterVersion": "2.5.0",
+    "ExporterVersion": "2.5.1",
     "ExportType": "DataTable",
     "DataTableName": "DT_Foo",
     "RowStruct": "AttributeMetaData",
@@ -343,7 +343,7 @@ transition 的键就是 `EditBlueprint` 在 `StateMachines` 下读的那套，�
 
 ```json
 {
-    "ExporterVersion": "2.5.0",
+    "ExporterVersion": "2.5.1",
     "ExportType": "Material",
     "MaterialName": "M_Foo",
     "ShadingModel": "MSM_DefaultLit",
@@ -395,7 +395,7 @@ MaterialInstance 导出参数覆写表。
 
 ```json
 {
-    "ExporterVersion": "2.5.0",
+    "ExporterVersion": "2.5.1",
     "ExportType": "Level",
     "LevelName": "L_Foo",
     "WorldSettings": {
@@ -445,7 +445,7 @@ ISM / HISM / Foliage 组件的实例数超过 200 时只导出数量、包围盒
 
 ```json
 {
-    "ExporterVersion": "2.5.0",
+    "ExporterVersion": "2.5.1",
     "ExportType": "NiagaraSystem",
     "SystemName": "NS_Foo",
     "ExposedParameters": [],
@@ -820,7 +820,7 @@ UE 只是验证场，三样可复用的东西不依赖它。
 
 ## 版本
 
-当前版本: **2.5.0**
+当前版本: **2.5.1**
 
 定义在 `src/Source/UAssetWorkbench/Public/UAssetWorkbenchVersion.h`，同时嵌进每份导出 JSON 的 `ExporterVersion` 字段。
 

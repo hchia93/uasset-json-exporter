@@ -34,7 +34,7 @@ The group is decided by the run name: suffix `Export` is the Export group, suffi
 
 ## Routing and architecture
 
-Every operation converges on the same calling contract. The heartbeat file `Saved/UAssetExportQueue/.alive` decides the route.
+Every operation converges on the same calling contract. The heartbeat file `Saved/UAssetWorkbenchTaskQueue/.alive` decides the route by mtime, falling back to the editor process id it carries when a synchronous stall leaves the mtime stale.
 
 | Editor state | Which path | Feedback |
 | --- | --- | --- |
@@ -165,7 +165,7 @@ One EdGraph serializer backs `BlueprintEdGraphExport`, `AnimBlueprintExport` and
 
 ```json
 {
-    "ExporterVersion": "2.5.0",
+    "ExporterVersion": "2.5.1",
     "ExportType": "BlueprintEdGraph",
     "Blueprint": "BP_Foo",
     "ParentClass": "PlayerController",
@@ -195,7 +195,7 @@ One EdGraph serializer backs `BlueprintEdGraphExport`, `AnimBlueprintExport` and
 
 ```json
 {
-    "ExporterVersion": "2.5.0",
+    "ExporterVersion": "2.5.1",
     "ExportType": "AnimMontage",
     "AssetName": "AM_Foo_Attack_01",
     "SequenceLength": 0.543,
@@ -243,7 +243,7 @@ One EdGraph serializer backs `BlueprintEdGraphExport`, `AnimBlueprintExport` and
 
 ```json
 {
-    "ExporterVersion": "2.5.0",
+    "ExporterVersion": "2.5.1",
     "ExportType": "AnimBlueprint",
     "StateMachines": [
         {
@@ -284,7 +284,7 @@ The transition keys are the ones `EditBlueprint` reads under `StateMachines`, so
 
 ```json
 {
-    "ExporterVersion": "2.5.0",
+    "ExporterVersion": "2.5.1",
     "ExportType": "WidgetLayout",
     "WidgetBlueprint": "WBP_Foo",
     "WidgetTree": {
@@ -316,7 +316,7 @@ The transition keys are the ones `EditBlueprint` reads under `StateMachines`, so
 
 ```json
 {
-    "ExporterVersion": "2.5.0",
+    "ExporterVersion": "2.5.1",
     "ExportType": "DataTable",
     "DataTableName": "DT_Foo",
     "RowStruct": "AttributeMetaData",
@@ -343,7 +343,7 @@ The transition keys are the ones `EditBlueprint` reads under `StateMachines`, so
 
 ```json
 {
-    "ExporterVersion": "2.5.0",
+    "ExporterVersion": "2.5.1",
     "ExportType": "Material",
     "MaterialName": "M_Foo",
     "ShadingModel": "MSM_DefaultLit",
@@ -395,7 +395,7 @@ MaterialInstance exports the parameter override table.
 
 ```json
 {
-    "ExporterVersion": "2.5.0",
+    "ExporterVersion": "2.5.1",
     "ExportType": "Level",
     "LevelName": "L_Foo",
     "WorldSettings": {
@@ -445,7 +445,7 @@ ISM / HISM / Foliage components with more than 200 instances export only the cou
 
 ```json
 {
-    "ExporterVersion": "2.5.0",
+    "ExporterVersion": "2.5.1",
     "ExportType": "NiagaraSystem",
     "SystemName": "NS_Foo",
     "ExposedParameters": [],
@@ -820,7 +820,7 @@ UE is only the proving ground, the three reusable parts do not depend on it.
 
 ## Version
 
-Current version: **2.5.0**
+Current version: **2.5.1**
 
 Defined in `src/Source/UAssetWorkbench/Public/UAssetWorkbenchVersion.h`, and embedded in the `ExporterVersion` field of every exported JSON.
 

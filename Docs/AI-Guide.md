@@ -167,7 +167,7 @@ grep -n "MyFunctionName" Intermediate/UAssetExport/Game/Blueprints/BP_Foo_r*.jso
 Import 与 Migrate。
 
 判定依据: wrapper 退出码
-细节: 编辑器开着看 Message Log 的 `UAsset Workbench` listing，编辑器关着看 `Saved/Logs/` 与 `Saved/UAssetExportQueue/last_commandlet.log`
+细节: 编辑器开着看 Message Log 的 `UAsset Workbench` listing，编辑器关着看 `Saved/Logs/` 与 `Saved/UAssetWorkbenchTaskQueue/last_commandlet.log`
 例外: `WidgetLayoutImport` 的退出码会被引擎改写，以日志里的 `Imported layout into ...` 为准
 
 Audit。

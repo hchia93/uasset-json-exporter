@@ -210,7 +210,7 @@ namespace
         return bWorld || bCharacter || bWeapon || bVehicle || bImpostor;
     }
 
-    FString UsageText(ETextureUsage Usage)
+    FString UsageName(ETextureUsage Usage)
     {
         TArray<FString> Parts;
         if (EnumHasAnyFlags(Usage, ETextureUsage::UI))
@@ -941,7 +941,7 @@ namespace
             if (IsRuleActive(Options, TEXT("T5")) && Settings.Compression == TC_Normalmap && !IsNormalMapGroup(Settings.LODGroup))
             {
                 const TextureGroup ExpectedGroup = ResolveExpectedNormalGroup(Record.Usage);
-                AddTextureFinding(State, AssetPath, TEXT("T5"), kSeverityWarning, TEXT("LODGroup"), GroupName(Settings.LODGroup), GroupName(ExpectedGroup), FString::Printf(TEXT("normal map, usage=%s"), *UsageText(Record.Usage)));
+                AddTextureFinding(State, AssetPath, TEXT("T5"), kSeverityWarning, TEXT("LODGroup"), GroupName(Settings.LODGroup), GroupName(ExpectedGroup), FString::Printf(TEXT("normal map, usage=%s"), *UsageName(Record.Usage)));
             }
 
             if (IsRuleActive(Options, TEXT("T6")) && Settings.LODGroup == TEXTUREGROUP_UI && bMipped)
@@ -951,7 +951,7 @@ namespace
 
             if (IsRuleActive(Options, TEXT("T7")) && Budget > 0 && BuiltMax > Budget)
             {
-                AddTextureFinding(State, AssetPath, TEXT("T7"), kSeverityWarning, TEXT("MaxTextureSize"), FString::Printf(TEXT("%dx%d"), Settings.BuiltX, Settings.BuiltY), FString::FromInt(Budget), FString::Printf(TEXT("usage=%s budget=%d"), *UsageText(Record.Usage), Budget));
+                AddTextureFinding(State, AssetPath, TEXT("T7"), kSeverityWarning, TEXT("MaxTextureSize"), FString::Printf(TEXT("%dx%d"), Settings.BuiltX, Settings.BuiltY), FString::FromInt(Budget), FString::Printf(TEXT("usage=%s budget=%d"), *UsageName(Record.Usage), Budget));
             }
 
             if (IsRuleActive(Options, TEXT("T8")) && !Settings.bPowerOfTwo && Settings.PowerOfTwoMode == ETexturePowerOfTwoSetting::None && bMipped)

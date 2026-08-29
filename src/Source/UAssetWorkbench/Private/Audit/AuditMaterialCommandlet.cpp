@@ -1003,7 +1003,7 @@ namespace
     }
 
     // Only reachable on the in-editor queue path, the editor statistics call needs a live RHI.
-    void GatherTier3(FMaterialRecord& Record)
+    void GatherEditorStats(FMaterialRecord& Record)
     {
         const FMaterialStatistics Statistics = UMaterialEditingLibrary::GetStatistics(Record.Material);
 
@@ -1535,7 +1535,7 @@ int32 UAuditMaterialCommandlet::Main(const FString& Params)
     {
         for (const FString& AssetPath : State.RecordOrder)
         {
-            GatherTier3(State.Records[AssetPath]);
+            GatherEditorStats(State.Records[AssetPath]);
         }
     }
 

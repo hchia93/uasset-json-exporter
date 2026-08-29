@@ -3,9 +3,10 @@
 # Wrapper for UAssetWorkbench.
 #
 # Routing:
-#   1. If <ProjectDir>/Saved/UAssetExportQueue/.alive is fresh (mtime within
-#      HEARTBEAT_FRESHNESS_SEC), an in-editor queue subsystem is active. Write
-#      a pending task json, wait for the corresponding done/<uuid>.json.
+#   1. If <ProjectDir>/Saved/UAssetWorkbenchTaskQueue/.alive is fresh (mtime within
+#      HEARTBEAT_FRESHNESS_SEC, or the pid it holds still running), an in-editor
+#      queue subsystem is active. Write a pending task json, wait for the
+#      corresponding done/<uuid>.json.
 #   2. Otherwise, launch the commandlet directly (legacy path). The commandlet
 #      itself also checks the heartbeat and aborts on conflict.
 #
@@ -64,7 +65,7 @@ esac
 UE_CMD="$UE_PATH/Engine/Binaries/Win64/UnrealEditor-Cmd.exe"
 PROJECT_DIR="$(dirname "$UPROJECT")"
 EXPORT_ROOT="$PROJECT_DIR/Intermediate/UAssetExport"
-QUEUE_ROOT="$PROJECT_DIR/Saved/UAssetExportQueue"
+QUEUE_ROOT="$PROJECT_DIR/Saved/UAssetWorkbenchTaskQueue"
 ALIVE_FILE="$QUEUE_ROOT/.alive"
 PENDING_DIR="$QUEUE_ROOT/pending"
 DONE_DIR="$QUEUE_ROOT/done"
@@ -91,10 +92,16 @@ is_heartbeat_fresh() {
     if [ ! -f "$ALIVE_FILE" ]; then
         return 1
     fi
-    local mtime now
+    local mtime now pid
     mtime=$(get_mtime "$ALIVE_FILE")
     now=$(date +%s)
     if [ $((now - mtime)) -le "$HEARTBEAT_FRESHNESS_SEC" ]; then
+        return 0
+    fi
+    # The ticker that stamps the file stops during a synchronous editor stall, registry scan or shader
+    # compile, so a stale mtime is not proof of death. The pid the editor wrote there is.
+    pid=$(tr -dc '0-9' < "$ALIVE_FILE" 2>/dev/null)
+    if is_winpid_alive "$pid"; then
         return 0
     fi
     return 1
@@ -192,6 +199,10 @@ EOF
             return 1
         fi
         if ! is_heartbeat_fresh; then
+            # The done file may have landed in the same second the editor went away.
+            if [ -f "$done_path" ]; then
+                break
+            fi
             echo "[run_commandlet] heartbeat went stale while waiting on $uuid" >&2
             return 1
         fi

@@ -405,21 +405,21 @@ bool UAssetWorkbench::HasStampedExportSince(const FString& AssetPath, const FDat
 
 UAssetWorkbench::FExportTarget::FExportTarget(const FString& InAssetPath)
     : m_AssetPath(InAssetPath)
-    , m_Path(GetExportPath(InAssetPath))
+    , m_ExportPath(GetExportPath(InAssetPath))
 {
 }
 
 bool UAssetWorkbench::FExportTarget::Save(const TSharedRef<FJsonObject>& JsonObject)
 {
-    if (!SaveJsonToFile(JsonObject, m_Path))
+    if (!SaveJsonToFile(JsonObject, m_ExportPath))
     {
         return false;
     }
 
-    const FString Stamped = StampExportPath(m_Path, m_AssetPath);
-    if (IFileManager::Get().Move(*Stamped, *m_Path))
+    const FString Stamped = StampExportPath(m_ExportPath, m_AssetPath);
+    if (IFileManager::Get().Move(*Stamped, *m_ExportPath))
     {
-        m_Path = Stamped;
+        m_ExportPath = Stamped;
     }
 
     return true;

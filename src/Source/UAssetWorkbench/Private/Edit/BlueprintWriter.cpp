@@ -13,6 +13,7 @@
 #include "EdGraphSchema_K2.h"
 #include "Engine/Blueprint.h"
 #include "K2Node_EditablePinBase.h"
+#include "K2Node_FunctionEntry.h"
 
 namespace
 {
@@ -192,6 +193,19 @@ namespace
 
 namespace BlueprintEdit
 {
+    UK2Node_FunctionEntry* FindEntryNode(const UEdGraph* Graph)
+    {
+        for (UEdGraphNode* Node : Graph->Nodes)
+        {
+            if (UK2Node_FunctionEntry* Entry = Cast<UK2Node_FunctionEntry>(Node))
+            {
+                return Entry;
+            }
+        }
+
+        return nullptr;
+    }
+
     bool ResolvePinType(const FBlueprintEditContext& Context, const TSharedPtr<FJsonObject>& Desc, FEdGraphPinType& OutType)
     {
         FString Type;

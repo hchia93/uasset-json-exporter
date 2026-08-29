@@ -26,7 +26,7 @@
 
 namespace
 {
-    UAnimStateEntryNode* FindEntry(const UAnimationStateMachineGraph* MachineGraph)
+    UAnimStateEntryNode* FindStateEntryNode(const UAnimationStateMachineGraph* MachineGraph)
     {
         for (UEdGraphNode* Node : MachineGraph->Nodes)
         {
@@ -41,7 +41,7 @@ namespace
 
     UAnimStateNodeBase* FindEntryTarget(const UAnimationStateMachineGraph* MachineGraph)
     {
-        const UAnimStateEntryNode* Entry = FindEntry(MachineGraph);
+        const UAnimStateEntryNode* Entry = FindStateEntryNode(MachineGraph);
         const UEdGraphPin* EntryPin = Entry ? Entry->GetOutputPin() : nullptr;
         if (!EntryPin || EntryPin->LinkedTo.Num() == 0 || !EntryPin->LinkedTo[0])
         {
@@ -414,7 +414,7 @@ namespace
 
         bool ConnectEntry(const FBlueprintEditContext& Context, UAnimationStateMachineGraph* MachineGraph, UAnimStateNode* StateNode) const
         {
-            UAnimStateEntryNode* Entry = FindEntry(MachineGraph);
+            UAnimStateEntryNode* Entry = FindStateEntryNode(MachineGraph);
             UEdGraphPin* EntryPin = Entry ? Entry->GetOutputPin() : nullptr;
             UEdGraphPin* StatePin = StateNode->GetInputPin();
             if (!EntryPin || !StatePin)

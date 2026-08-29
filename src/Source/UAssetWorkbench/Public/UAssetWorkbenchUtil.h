@@ -68,11 +68,11 @@ namespace UAssetWorkbench
 
         bool Save(const TSharedRef<FJsonObject>& JsonObject);
 
-        const FString& GetPath() const { return m_Path; }
+        const FString& GetPath() const { return m_ExportPath; }
 
     private:
         FString m_AssetPath;
-        FString m_Path;
+        FString m_ExportPath;
     };
 
     // Serialize JsonObject to FilePath as UTF-8 (no BOM). Creates output dir if missing.

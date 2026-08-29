@@ -669,7 +669,7 @@ namespace
         }
     }
 
-    bool ApplyOperation(const FString& Op, const TArray<UEdGraphNode*>& Nodes, const FLayoutOpParams& Params)
+    bool ApplyLayoutOp(const FString& Op, const TArray<UEdGraphNode*>& Nodes, const FLayoutOpParams& Params)
     {
         if (Nodes.IsEmpty())
         {
@@ -945,7 +945,7 @@ namespace
                 UE_LOG(LogUAssetWorkbenchEditor, Display, TEXT("  %s: %s on %d node(s)"), *Context.Blueprint->GetName(), *Op, Nodes.Num());
                 ++Context.Ops;
 
-                if (!ApplyOperation(Op, Nodes, Params))
+                if (!ApplyLayoutOp(Op, Nodes, Params))
                 {
                     return false;
                 }

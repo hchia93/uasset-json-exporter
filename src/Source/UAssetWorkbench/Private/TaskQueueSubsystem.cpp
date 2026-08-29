@@ -1,6 +1,6 @@
-#include "AssetExportQueueSubsystem.h"
+#include "TaskQueueSubsystem.h"
 
-#include "AssetExportQueueProtocol.h"
+#include "TaskQueueProtocol.h"
 #include "UAssetWorkbenchModule.h"
 #include "UAssetWorkbenchUtil.h"
 
@@ -22,7 +22,7 @@
 #include "UObject/UObjectIterator.h"
 #include "Widgets/Notifications/SNotificationList.h"
 
-#define LOCTEXT_NAMESPACE "UAssetExportQueue"
+#define LOCTEXT_NAMESPACE "UAssetWorkbenchTaskQueue"
 
 namespace
 {
@@ -61,39 +61,39 @@ namespace
     }
 }
 
-FString UAssetExportQueueSubsystem::GetQueueRoot()
+FString UAssetWorkbenchTaskQueueSubsystem::GetQueueRoot()
 {
     return FPaths::ConvertRelativePathToFull(
-        FPaths::Combine(FPaths::ProjectDir(), UAssetExportQueue::QueueRootRelative));
+        FPaths::Combine(FPaths::ProjectDir(), UAssetWorkbenchTaskQueue::QueueRootRelative));
 }
 
-FString UAssetExportQueueSubsystem::GetPendingDir()
+FString UAssetWorkbenchTaskQueueSubsystem::GetPendingDir()
 {
-    return FPaths::Combine(GetQueueRoot(), UAssetExportQueue::PendingSubdir);
+    return FPaths::Combine(GetQueueRoot(), UAssetWorkbenchTaskQueue::PendingSubdir);
 }
 
-FString UAssetExportQueueSubsystem::GetProcessingDir()
+FString UAssetWorkbenchTaskQueueSubsystem::GetProcessingDir()
 {
-    return FPaths::Combine(GetQueueRoot(), UAssetExportQueue::ProcessingSubdir);
+    return FPaths::Combine(GetQueueRoot(), UAssetWorkbenchTaskQueue::ProcessingSubdir);
 }
 
-FString UAssetExportQueueSubsystem::GetDoneDir()
+FString UAssetWorkbenchTaskQueueSubsystem::GetDoneDir()
 {
-    return FPaths::Combine(GetQueueRoot(), UAssetExportQueue::DoneSubdir);
+    return FPaths::Combine(GetQueueRoot(), UAssetWorkbenchTaskQueue::DoneSubdir);
 }
 
-FString UAssetExportQueueSubsystem::GetAliveFile()
+FString UAssetWorkbenchTaskQueueSubsystem::GetAliveFile()
 {
-    return FPaths::Combine(GetQueueRoot(), UAssetExportQueue::AliveFileName);
+    return FPaths::Combine(GetQueueRoot(), UAssetWorkbenchTaskQueue::AliveFileName);
 }
 
-FString UAssetExportQueueSubsystem::GetExportOutputRoot()
+FString UAssetWorkbenchTaskQueueSubsystem::GetExportOutputRoot()
 {
     return FPaths::ConvertRelativePathToFull(
         FPaths::Combine(FPaths::ProjectDir(), TEXT("Intermediate"), TEXT("UAssetExport")));
 }
 
-bool UAssetExportQueueSubsystem::ShouldCreateSubsystem(UObject* Outer) const
+bool UAssetWorkbenchTaskQueueSubsystem::ShouldCreateSubsystem(UObject* Outer) const
 {
     // Live-editor side of the export handshake only. Inside a commandlet this subsystem's own
     // heartbeat would trip the commandlet's live-editor guard and deadlock the standalone path.
@@ -104,7 +104,7 @@ bool UAssetExportQueueSubsystem::ShouldCreateSubsystem(UObject* Outer) const
     return Super::ShouldCreateSubsystem(Outer);
 }
 
-void UAssetExportQueueSubsystem::Initialize(FSubsystemCollectionBase& Collection)
+void UAssetWorkbenchTaskQueueSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
 
@@ -112,8 +112,8 @@ void UAssetExportQueueSubsystem::Initialize(FSubsystemCollectionBase& Collection
     TouchHeartbeat();
 
     m_HeartbeatHandle = FTSTicker::GetCoreTicker().AddTicker(
-        FTickerDelegate::CreateUObject(this, &UAssetExportQueueSubsystem::HeartbeatTick),
-        UAssetExportQueue::HeartbeatIntervalSeconds);
+        FTickerDelegate::CreateUObject(this, &UAssetWorkbenchTaskQueueSubsystem::HeartbeatTick),
+        UAssetWorkbenchTaskQueue::HeartbeatIntervalSeconds);
 
     m_WatchedDirectory = GetPendingDir();
     FDirectoryWatcherModule& WatcherModule = FModuleManager::LoadModuleChecked<FDirectoryWatcherModule>(TEXT("DirectoryWatcher"));
@@ -121,16 +121,16 @@ void UAssetExportQueueSubsystem::Initialize(FSubsystemCollectionBase& Collection
     {
         Watcher->RegisterDirectoryChangedCallback_Handle(
             m_WatchedDirectory,
-            IDirectoryWatcher::FDirectoryChanged::CreateUObject(this, &UAssetExportQueueSubsystem::OnPendingDirectoryChanged),
+            IDirectoryWatcher::FDirectoryChanged::CreateUObject(this, &UAssetWorkbenchTaskQueueSubsystem::OnPendingDirectoryChanged),
             m_DirectoryWatcherHandle);
     }
 
     ScanPendingDirectory();
 
-    UE_LOG(LogUAssetWorkbenchCore, Log, TEXT("AssetExportQueueSubsystem online at %s"), *GetQueueRoot());
+    UE_LOG(LogUAssetWorkbenchCore, Log, TEXT("TaskQueueSubsystem online at %s"), *GetQueueRoot());
 }
 
-void UAssetExportQueueSubsystem::Deinitialize()
+void UAssetWorkbenchTaskQueueSubsystem::Deinitialize()
 {
     if (m_HeartbeatHandle.IsValid())
     {
@@ -156,7 +156,7 @@ void UAssetExportQueueSubsystem::Deinitialize()
     Super::Deinitialize();
 }
 
-void UAssetExportQueueSubsystem::InitializeQueueDirectories() const
+void UAssetWorkbenchTaskQueueSubsystem::InitializeQueueDirectories() const
 {
     IFileManager& FileManager = IFileManager::Get();
     FileManager.MakeDirectory(*GetQueueRoot(), true);
@@ -165,34 +165,33 @@ void UAssetExportQueueSubsystem::InitializeQueueDirectories() const
     FileManager.MakeDirectory(*GetDoneDir(), true);
 }
 
-void UAssetExportQueueSubsystem::TouchHeartbeat() const
+void UAssetWorkbenchTaskQueueSubsystem::TouchHeartbeat() const
 {
     const FString AlivePath = GetAliveFile();
-    if (!IFileManager::Get().FileExists(*AlivePath))
-    {
-        FFileHelper::SaveStringToFile(TEXT(""), *AlivePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
-    }
+    // Content is this editor's pid, so a reader can tell a stalled editor from a dead one once mtime goes stale.
+    const FString PidText = FString::Printf(TEXT("%u"), FPlatformProcess::GetCurrentProcessId());
+    FFileHelper::SaveStringToFile(PidText, *AlivePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
     IFileManager::Get().SetTimeStamp(*AlivePath, FDateTime::UtcNow());
 }
 
-bool UAssetExportQueueSubsystem::HeartbeatTick(float DeltaTime)
+bool UAssetWorkbenchTaskQueueSubsystem::HeartbeatTick(float DeltaTime)
 {
     TouchHeartbeat();
     return true;
 }
 
-void UAssetExportQueueSubsystem::OnPendingDirectoryChanged(const TArray<FFileChangeData>& FileChanges)
+void UAssetWorkbenchTaskQueueSubsystem::OnPendingDirectoryChanged(const TArray<FFileChangeData>& FileChanges)
 {
     ScanPendingDirectory();
 }
 
-void UAssetExportQueueSubsystem::ScanPendingDirectory()
+void UAssetWorkbenchTaskQueueSubsystem::ScanPendingDirectory()
 {
-    if (m_Processing)
+    if (m_bProcessing)
     {
         return;
     }
-    TGuardValue<bool> ProcessingGuard(m_Processing, true);
+    TGuardValue<bool> ProcessingGuard(m_bProcessing, true);
 
     const FString PendingGlob = FPaths::Combine(GetPendingDir(), TEXT("*.json"));
     TArray<FString> PendingFiles;
@@ -206,7 +205,7 @@ void UAssetExportQueueSubsystem::ScanPendingDirectory()
     }
 }
 
-void UAssetExportQueueSubsystem::ProcessTaskFile(const FString& PendingPath)
+void UAssetWorkbenchTaskQueueSubsystem::ProcessTaskFile(const FString& PendingPath)
 {
     const FString BaseName = FPaths::GetBaseFilename(PendingPath);
     const FString ProcessingPath = FPaths::Combine(GetProcessingDir(), BaseName + TEXT(".json"));
@@ -227,11 +226,11 @@ void UAssetExportQueueSubsystem::ProcessTaskFile(const FString& PendingPath)
     }
 
     FString RunName;
-    Task->TryGetStringField(UAssetExportQueue::FieldRunName, RunName);
+    Task->TryGetStringField(UAssetWorkbenchTaskQueue::FieldRunName, RunName);
 
     TArray<FString> Assets;
     const TArray<TSharedPtr<FJsonValue>>* AssetsValue = nullptr;
-    if (Task->TryGetArrayField(UAssetExportQueue::FieldAssets, AssetsValue) && AssetsValue)
+    if (Task->TryGetArrayField(UAssetWorkbenchTaskQueue::FieldAssets, AssetsValue) && AssetsValue)
     {
         for (const TSharedPtr<FJsonValue>& Entry : *AssetsValue)
         {
@@ -243,7 +242,7 @@ void UAssetExportQueueSubsystem::ProcessTaskFile(const FString& PendingPath)
     }
 
     FString ExtraArgs;
-    Task->TryGetStringField(UAssetExportQueue::FieldExtraArgs, ExtraArgs);
+    Task->TryGetStringField(UAssetWorkbenchTaskQueue::FieldExtraArgs, ExtraArgs);
 
     if (RunName.IsEmpty())
     {
@@ -362,7 +361,7 @@ void UAssetExportQueueSubsystem::ProcessTaskFile(const FString& PendingPath)
     }
 }
 
-int32 UAssetExportQueueSubsystem::DispatchRun(const FString& RunName, const FString& AssetsCsv, const FString& ExtraArgs) const
+int32 UAssetWorkbenchTaskQueueSubsystem::DispatchRun(const FString& RunName, const FString& AssetsCsv, const FString& ExtraArgs) const
 {
     UClass* CmdClass = FindCommandletClass(RunName);
     if (!CmdClass)
@@ -397,7 +396,7 @@ int32 UAssetExportQueueSubsystem::DispatchRun(const FString& RunName, const FStr
     return Commandlet->Main(Params);
 }
 
-UClass* UAssetExportQueueSubsystem::FindCommandletClass(const FString& RunName)
+UClass* UAssetWorkbenchTaskQueueSubsystem::FindCommandletClass(const FString& RunName)
 {
     const FString ClassName = RunName + TEXT("Commandlet");
     for (TObjectIterator<UClass> It; It; ++It)
@@ -411,21 +410,21 @@ UClass* UAssetExportQueueSubsystem::FindCommandletClass(const FString& RunName)
     return nullptr;
 }
 
-void UAssetExportQueueSubsystem::WriteDoneFile(const FString& DoneFilePath, int32 ExitCode, const TArray<FString>& Outputs, const FString& ErrorMessage)
+void UAssetWorkbenchTaskQueueSubsystem::WriteDoneFile(const FString& DoneFilePath, int32 ExitCode, const TArray<FString>& Outputs, const FString& ErrorMessage)
 {
     TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-    Root->SetNumberField(UAssetExportQueue::FieldExitCode, ExitCode);
+    Root->SetNumberField(UAssetWorkbenchTaskQueue::FieldExitCode, ExitCode);
 
     TArray<TSharedPtr<FJsonValue>> OutputsArray;
     for (const FString& OutPath : Outputs)
     {
         OutputsArray.Add(MakeShared<FJsonValueString>(OutPath));
     }
-    Root->SetArrayField(UAssetExportQueue::FieldOutputs, OutputsArray);
+    Root->SetArrayField(UAssetWorkbenchTaskQueue::FieldOutputs, OutputsArray);
 
     if (!ErrorMessage.IsEmpty())
     {
-        Root->SetStringField(UAssetExportQueue::FieldError, ErrorMessage);
+        Root->SetStringField(UAssetWorkbenchTaskQueue::FieldError, ErrorMessage);
     }
 
     FString Serialized;
@@ -434,7 +433,7 @@ void UAssetExportQueueSubsystem::WriteDoneFile(const FString& DoneFilePath, int3
     FFileHelper::SaveStringToFile(Serialized, *DoneFilePath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 }
 
-TSharedPtr<SNotificationItem> UAssetExportQueueSubsystem::ShowStartToast(const FString& RunName, const TArray<FString>& Assets) const
+TSharedPtr<SNotificationItem> UAssetWorkbenchTaskQueueSubsystem::ShowStartToast(const FString& RunName, const TArray<FString>& Assets) const
 {
     const FString Names = FormatAssetNames(Assets);
     const FString Message = FString::Printf(TEXT("Exporting %d (%s): %s..."), Assets.Num(), *RunName, *Names);
@@ -459,7 +458,7 @@ TSharedPtr<SNotificationItem> UAssetExportQueueSubsystem::ShowStartToast(const F
     return Item;
 }
 
-void UAssetExportQueueSubsystem::FinishToast(TSharedPtr<SNotificationItem> Item, bool bSuccess, const FString& Summary)
+void UAssetWorkbenchTaskQueueSubsystem::FinishToast(TSharedPtr<SNotificationItem> Item, bool bSuccess, const FString& Summary)
 {
     if (!Item.IsValid())
     {
